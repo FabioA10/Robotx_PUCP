@@ -1,0 +1,13 @@
+# ROS2 ignore
+build/
+install/
+log/
+
+# Python ignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
