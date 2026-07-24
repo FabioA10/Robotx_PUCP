@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'usv_vision'
+package_name = 'usv_perception'
 
 setup(
     name=package_name,
@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'vision_node = usv_vision.vision_node:main'
+            'vision_node = usv_perception.vision_node:main'
         ],
     },
 )

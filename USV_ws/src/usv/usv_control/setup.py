@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'usv_navigation'
+package_name = 'usv_control'
 
 setup(
     name=package_name,
@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'navigation_node = usv_navigation.navigation_node:main'
+            'navigation_node = usv_control.navigation_node:main'
         ],
     },
 )

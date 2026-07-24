@@ -6,8 +6,8 @@ import numpy as np
 import subprocess
 
 # Importamos nuestra lógica core (Asegúrate de que existan en tu paquete)
-from usv_vision.core.camera import BufferlessUSBCapture
-from usv_vision.core.evasion import EvasionProcessor
+from usv_perception.core.camera import BufferlessUSBCapture
+from usv_perception.core.evasion import EvasionProcessor
 
 class VisionNode(Node):
     def __init__(self):
@@ -19,11 +19,11 @@ class VisionNode(Node):
         self.declare_parameter('ip_base', '192.168.2.1') # IP predeterminada para la conexión por antena/ethernet
         self.declare_parameter('puerto_udp', 5000)
         
-        modo_lab = self.get_parameter('modo_laboratorio').value
-        cam_idx = self.get_parameter('cam_index').value
-        ip_base = self.get_parameter('ip_base').value
-        puerto = self.get_parameter('puerto_udp').value
-        
+        self.modo_lab = self.get_parameter('modo_laboratorio').get_parameter_value().bool_value
+        cam_idx = self.get_parameter('cam_index').get_parameter_value().integer_value
+        ip_base = self.get_parameter('ip_base').get_parameter_value().string_value
+        puerto = self.get_parameter('puerto_udp').get_parameter_value().integer_value
+
         # 2. Inicializar Publisher (Solo Alarma para la Navegación)
         self.pub_alarma = self.create_publisher(Float32, '/robotx/alarma_frontal', 10)
         
@@ -51,20 +51,18 @@ class VisionNode(Node):
             self.out_video = None
         
         # 5. Timer principal (~30 Hz)
-        self.timer = self.create_timer(0.033, self.timer_callback)
+        self.timer = self.create_timer(1./30., self.timer_callback)
         
-        entorno_str = "LABORATORIO SECO" if modo_lab else "ACUATICO/MAR"
+        entorno_str = "LABORATORIO SECO" if self.modo_lab else "ACUATICO/MAR"
         self.get_logger().info(f"[+] Nodo USV Vision Activo. Entorno: {entorno_str}")
 
     def timer_callback(self):
         ret, frame_raw = self.camara.read()
         if not ret or frame_raw is None:
             return
-            
-        modo_lab = self.get_parameter('modo_laboratorio').value
         
         # Procesar frame
-        detecciones, accion, alarma_num, output_hud = self.procesador.procesar_frame(frame_raw, modo_laboratorio=modo_lab)
+        detecciones, accion, alarma_num, output_hud = self.procesador.procesar_frame(frame_raw, modo_laboratorio=self.modo_lab)
         
         # --- Dibujar HUD Visual ---
         h_img, w_img = output_hud.shape[:2]
