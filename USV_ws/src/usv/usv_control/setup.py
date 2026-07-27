@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'navigation_node = usv_control.navigation_node:main'
+            'navigation_node = usv_control.navigation_node:main',
+            'beacon_control = usv_control.beacon_control:main',
         ],
     },
 )
