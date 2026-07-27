@@ -43,7 +43,6 @@ class BeaconControlNode(Node):
     - BCM GPIO pin configuration via ROS 2 parameters
     - Hardware isolation with Mock fallback when gpiozero or Pi GPIO is unavailable
     - Supports simple Bool control (ON/OFF) and Int8 mode control (0=OFF, 1=ON, 2=SLOW_BLINK, 3=FAST_BLINK)
-    - Watchdog timer: automatically silences buzzer/lights if control signals stop
     - Status & diagnostic publisher at 1 Hz
     - Safe hardware cleanup on node shutdown
     """
@@ -56,16 +55,12 @@ class BeaconControlNode(Node):
         self.declare_parameter('pin_light2', 27)
         self.declare_parameter('pin_light3', 22)
         self.declare_parameter('pin_buzzer', 23)
-        self.declare_parameter('enable_watchdog', True)
-        self.declare_parameter('watchdog_timeout_sec', 5.0)
 
         # Retrieve parameter values
         self.pin_light1 = self.get_parameter('pin_light1').get_parameter_value().integer_value
         self.pin_light2 = self.get_parameter('pin_light2').get_parameter_value().integer_value
         self.pin_light3 = self.get_parameter('pin_light3').get_parameter_value().integer_value
         self.pin_buzzer = self.get_parameter('pin_buzzer').get_parameter_value().integer_value
-        self.enable_watchdog = self.get_parameter('enable_watchdog').get_parameter_value().bool_value
-        self.watchdog_timeout_sec = self.get_parameter('watchdog_timeout_sec').get_parameter_value().double_value
 
         # Initialize Hardware Devices (with fallback to MockDevice)
         self.hw_light1 = self._init_device(LED, self.pin_light1, "Light1")
@@ -80,10 +75,6 @@ class BeaconControlNode(Node):
             'light3': 0,
             'buzzer': 0
         }
-
-        # Watchdog & Timers
-        self.last_msg_time = self.get_clock().now()
-        self.watchdog_triggered = False
 
         # Subscriptions - Boolean (Simple ON/OFF)
         self.sub_light1 = self.create_subscription(Bool,
@@ -121,6 +112,14 @@ class BeaconControlNode(Node):
                                                         self.buzzer_mode_callback,
                                                         10)
 
+        # Status Publisher & Timer
+        self.pub_status = self.create_publisher(String, '/robotx/beacon/status', 10)
+        self.create_timer(1.0, self._publish_status)
+
+        self.get_logger().info("=== BEACON CONTROL NODE INITIALIZED ===")
+        self.get_logger().info(f"GPIO Pins -> Light1:{self.pin_light1}, Light2:{self.pin_light2}, Light3:{self.pin_light3}, Buzzer:{self.pin_buzzer}")
+        self.get_logger().info(f"Hardware Mode: {'Real GPIO (gpiozero)' if GPIO_AVAILABLE else 'Mock Simulation'}")
+
     # Boolean Callbacks
     def light1_callback(self, msg: Bool):
         self._set_mode('light1', 1 if msg.data else 0)
@@ -147,16 +146,6 @@ class BeaconControlNode(Node):
     def buzzer_mode_callback(self, msg: Int8):
         self._set_mode('buzzer', msg.data)
 
-        # Status Publisher & Timers
-        self.pub_status = self.create_publisher(String, '/robotx/beacon/status', 10)
-        self.create_timer(1.0, self._publish_status)
-        self.create_timer(0.5, self._check_watchdog)
-
-        self.get_logger().info("=== BEACON CONTROL NODE INITIALIZED ===")
-        self.get_logger().info(f"GPIO Pins -> Light1:{self.pin_light1}, Light2:{self.pin_light2}, Light3:{self.pin_light3}, Buzzer:{self.pin_buzzer}")
-        self.get_logger().info(f"Hardware Mode: {'Real GPIO (gpiozero)' if GPIO_AVAILABLE else 'Mock Simulation'}")
-        self.get_logger().info(f"Watchdog: {'Enabled' if self.enable_watchdog else 'Disabled'} ({self.watchdog_timeout_sec}s timeout)")
-
     def _init_device(self, device_cls, pin, name):
         if GPIO_AVAILABLE and device_cls is not None:
             try:
@@ -168,11 +157,6 @@ class BeaconControlNode(Node):
             return MockDevice(name, pin)
 
     def _set_mode(self, device_name, mode):
-        self.last_msg_time = self.get_clock().now()
-        if self.watchdog_triggered:
-            self.watchdog_triggered = False
-            self.get_logger().info("Watchdog reset: incoming beacon command received.")
-
         if self.modes[device_name] == mode:
             return
 
@@ -203,16 +187,6 @@ class BeaconControlNode(Node):
         except Exception as e:
             self.get_logger().error(f"Error controlling hardware for {device_name}: {e}")
 
-    def _check_watchdog(self):
-        if not self.enable_watchdog or self.watchdog_triggered:
-            return
-
-        elapsed_sec = (self.get_clock().now() - self.last_msg_time).nanoseconds / 1e9
-        if elapsed_sec > self.watchdog_timeout_sec:
-            self.watchdog_triggered = True
-            self.get_logger().warn(f"Watchdog timeout! No command received for {elapsed_sec:.1f}s. Resetting hardware to SAFE state (OFF).")
-            self._safe_reset()
-
     def _safe_reset(self):
         for dev in ['light1', 'light2', 'light3', 'buzzer']:
             self.modes[dev] = 0
@@ -226,7 +200,6 @@ class BeaconControlNode(Node):
         msg = String()
         status_data = {
             'hardware_mode': 'gpiozero' if GPIO_AVAILABLE else 'mock',
-            'watchdog_triggered': self.watchdog_triggered,
             'modes': self.modes,
             'pins': {
                 'light1': self.pin_light1,
