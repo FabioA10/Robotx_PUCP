@@ -62,10 +62,10 @@ class NavegacionAutonoma(Node):
             
             if self.alarma_vision == 1.0:
                 # Disminuimos un poco el requerimiento de Z para no saturar el controlador de vuelo
-                cmd.angular.z = -0.8 
+                cmd.angular.z = -1 
                 estado += " -> PIVOTE DERECHO (CON AVANCE)"
             elif self.alarma_vision == 2.0:
-                cmd.angular.z = 0.8
+                cmd.angular.z = 1
                 estado += " -> PIVOTE IZQUIERDO (CON AVANCE)"
             elif self.alarma_vision == 3.0:
                 # El retroceso táctico sí puede requerir Z = 0
