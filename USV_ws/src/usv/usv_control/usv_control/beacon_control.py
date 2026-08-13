@@ -110,12 +110,7 @@ class BeaconControlNode(Node):
         self.mavros_conectado = False
         self.mavros_sys_status = 0
 
-        from rclpy.qos import (
-            DurabilityPolicy,
-            HistoryPolicy,
-            QoSProfile,
-            ReliabilityPolicy,
-        )
+        from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
         qos_mavros = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -136,21 +131,22 @@ class BeaconControlNode(Node):
         self.create_subscription(Int8, '/robotx/beacon/light2_mode', self._light2_mode_callback, 10)
         self.create_subscription(Int8, '/robotx/beacon/light3_mode', self._light3_mode_callback, 10)
         self.create_subscription(Int8, '/robotx/beacon/buzzer_mode', self._buzzer_mode_callback, 10)
+        self.create_subscription(RCIn, '/mavros/rc/in', self._rc_callback, qos_mavros)
 
         self.pub_status = self.create_publisher(String, '/robotx/beacon/status', 10)
         self.pub_cmd_vel = self.create_publisher(Twist, '/mavros/setpoint_velocity/cmd_vel_unstamped', 10)
-        self.create_timer(1.0, self._publish_status)
-        self.create_timer(0.1, self._failsafe_vel_loop)
 
         self._arming_client = self.create_client(CommandBool, '/mavros/cmd/arming')
-        self._last_mavros_time = self.get_clock().now()
-        self.create_timer(1.0, self._check_connection_timeout)
 
+        self._last_mavros_time = self.get_clock().now()
         self._last_rc_time = self.get_clock().now()
         self._herelink_ok = False
         self._herelink_perdido = False
         self._failsafe_signature_start_time = None
-        self.create_subscription(RCIn, '/mavros/rc/in', self._rc_callback, qos_mavros)
+
+        self.create_timer(1.0, self._publish_status)
+        self.create_timer(0.1, self._failsafe_vel_loop)
+        self.create_timer(1.0, self._check_connection_timeout)
         self.create_timer(1.0, self._check_rc_timeout)
 
         self._set_keepalive(False)
@@ -367,6 +363,8 @@ class BeaconControlNode(Node):
             try:
                 if hasattr(self.hw_buzzer, 'beep'):
                     self.hw_buzzer.beep(on_time=0.1, off_time=0.1, n=1, background=True)
+                else:
+                    self.hw_buzzer.blink(on_time=0.1, off_time=0.1, n=1, background=True)
             except Exception as e:
                 self.get_logger().error(f'Error buzzer: {e}')
             self.get_logger().info('[BEACON] ROJA ON + 1 beep')
