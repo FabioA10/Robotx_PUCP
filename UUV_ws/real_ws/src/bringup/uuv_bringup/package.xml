@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd"
+             schematypens="http://www.w3.org/2001/XMLSchema"?>
+
+<package format="3">
+  <name>uuv_bringup</name>
+  <version>0.0.1</version>
+
+  <description>
+    Bringup package for the RobotX PUCP BlueROV2 Heavy UUV.
+  </description>
+
+  <maintainer email="a20216480@pucp.edu.pe">
+    RobotX PUCP
+  </maintainer>
+
+  <license>TODO</license>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <exec_depend>rov_control</exec_depend>
+  <exec_depend>ping360_ros2</exec_depend>
+  <exec_depend>ping360_filter</exec_depend>
+  <exec_depend>seatrac_ros2</exec_depend>
+  <exec_depend>bluerov2_camera</exec_depend>
+  <exec_depend>camera_control</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
