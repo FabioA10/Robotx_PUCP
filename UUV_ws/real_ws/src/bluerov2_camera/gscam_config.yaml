@@ -1,0 +1,6 @@
+gscam_main:
+  ros__parameters:
+    camera_name: bluerov2_cam
+    camera_info_url: ""
+    camera_frame_id: camera_link
+    gscam_config: "udpsrc port=5600 caps='application/x-rtp, media=video, clock-rate=90000, encoding-name=H264, payload=96' ! rtph264depay ! avdec_h264 ! videoconvert ! appsink"
