@@ -4,13 +4,13 @@ Lanza MAVROS + beacon_control juntos.
 
 Uso:
   # Conexión por UART (Raspberry Pi → Pixhawk/ArduPilot por cable serial)
-  ros2 launch usv_control beacon_system.launch.py fcu_url:=/dev/ttyAMA0:57600
+  ros2 launch usv_bringup beacon_system.launch.py fcu_url:=/dev/ttyAMA0:57600
 
   # Conexión por UDP (simulador o conexión por red)
-  ros2 launch usv_control beacon_system.launch.py fcu_url:=udp://0.0.0.0:14550@
+  ros2 launch usv_bringup beacon_system.launch.py fcu_url:=udp://0.0.0.0:14550@
 
   # Solo beacon (si MAVROS ya está corriendo en otra terminal)
-  ros2 launch usv_control beacon_system.launch.py launch_mavros:=false
+  ros2 launch usv_bringup beacon_system.launch.py launch_mavros:=false
 """
 
 import os
@@ -73,7 +73,7 @@ def generate_launch_description():
     #   flight mode MANUAL/ACRO/STEERING → luz AMARILLA + buzzer lento
     #   flight mode AUTO/GUIDED/RTL      → luz VERDE   + doble beep
     beacon_node = Node(
-        package='usv_control',
+        package='usv_hardware',
         executable='beacon_control',
         name='beacon_control_node',
         output='screen',

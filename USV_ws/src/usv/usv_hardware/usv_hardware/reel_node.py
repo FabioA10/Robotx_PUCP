@@ -3,7 +3,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64, String, Bool
 
-from usv_control.mg6010_can import MG6010, MG6010Error
+from usv_hardware.drivers.mg6010_can import MG6010, MG6010Error
 
 class ReelControlNode(Node):
     """

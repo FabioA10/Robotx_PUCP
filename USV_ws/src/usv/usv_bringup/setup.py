@@ -1,6 +1,8 @@
+import os
+from glob import glob
 from setuptools import find_packages, setup
 
-package_name = 'usv_control'
+package_name = 'usv_bringup'
 
 setup(
     name=package_name,
@@ -10,17 +12,18 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'),
+            glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'config'),
+            glob('config/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='robotx',
     maintainer_email='robotx@todo.todo',
-    description='Control and navigation nodes for the RobotX USV.',
-    license='TODO: License declaration',
+    description='Launch and configuration package for the RobotX USV.',
+    license='Apache-2.0',
     entry_points={
-        'console_scripts': [
-            'navigation_node = usv_control.navigation_node:main',
-            'position_control_node = usv_control.position_control_node:main',
-        ],
+        'console_scripts': [],
     },
 )

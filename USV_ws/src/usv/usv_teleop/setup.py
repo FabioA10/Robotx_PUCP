@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'usv_control'
+package_name = 'usv_teleop'
 
 setup(
     name=package_name,
@@ -15,12 +15,11 @@ setup(
     zip_safe=True,
     maintainer='robotx',
     maintainer_email='robotx@todo.todo',
-    description='Control and navigation nodes for the RobotX USV.',
-    license='TODO: License declaration',
+    description='Manual teleoperation nodes for the RobotX USV.',
+    license='Apache-2.0',
     entry_points={
         'console_scripts': [
-            'navigation_node = usv_control.navigation_node:main',
-            'position_control_node = usv_control.position_control_node:main',
+            'teleop_node = usv_teleop.keyboard_teleop_node:main',
         ],
     },
 )
