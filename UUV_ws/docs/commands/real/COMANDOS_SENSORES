@@ -1,0 +1,518 @@
+					CORRER NODO DE LECTURA DE DATOS DEL USBL
+
+
+cd ~/PDM/BLUE_BOT/bluebot_ws
+
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 run seatrac_ros2 seatrac_serial_node \
+  --ros-args \
+  -p port:=/dev/ttyUSB0
+  
+  
+
+
+
+					MOSTRAR TRAMA DEL ESTADO DEL USBL
+					
+					
+
+cd ~/PDM/BLUE_BOT/bluebot_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 topic echo /seatrac/status_raw --once
+
+
+
+
+
+					DECODIFICADOR DE TRAMAS
+					
+				
+
+cd ~/PDM/BLUE_BOT/bluebot_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 run seatrac_ros2 seatrac_status_node
+
+
+
+					VERIFICAR QUE NADIE ESTA USANDO UN PUERTO USB
+
+fuser -v /dev/ttyUSB0
+
+
+
+					COMO REINICIAR EL BUFFER DEL USBL Y COMPROBAR QUE ESTA VACIO 	- debe estar levantada la lectura y decodificacion dl usbl(dos primeros nodos
+					
+					
+cd ~/PDM/BLUE_BOT/bluebot_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 service call \
+  /seatrac/calibration/reset_magnetometer \
+  std_srvs/srv/Trigger \
+  "{}"
+
+
+
+
+cd ~/PDM/BLUE_BOT/bluebot_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 topic echo /seatrac/status \
+  --once \
+  --field data \
+  --full-length | python3 -c '
+import sys
+import json
+
+for line in sys.stdin:
+    line = line.strip()
+    if line.startswith("{"):
+        data = json.loads(line)
+        print("Buffer:", data.get("mag_calibration_buffer_percent"), "%")
+        print("Calibración válida:", data.get("mag_calibration_valid"))
+        print("Calidad:", data.get("mag_calibration_fit_percent"), "%")
+        break
+'
+
+
+					COMO CALIBRAR EL SENSOR - solo se recopilan muestras
+					
+					
+CALIBRACION CALCULADA ? ( este funciona solo con el nodo receptor de datos
+
+ros2 service call \
+  /seatrac/calibration/calculate_magnetometer \
+  std_srvs/srv/Trigger \
+  "{}"
+
+
+COMO VGUARDAR Y VER LA CALIDAD DE LA ALIBRACION (esta funciona con nodo receptor y conversor
+
+
+cd ~/PDM/BLUE_BOT/bluebot_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 topic echo /seatrac/status \
+  --once \
+  --field data \
+  --full-length | python3 -c '
+import sys
+import json
+
+for line in sys.stdin:
+    line = line.strip()
+
+    if line.startswith("{"):
+        data = json.loads(line)
+
+        print(
+            "Buffer:",
+            data.get("mag_calibration_buffer_percent"),
+            "%"
+        )
+        print(
+            "Calibración válida:",
+            data.get("mag_calibration_valid")
+        )
+        print(
+            "Calidad:",
+            data.get("mag_calibration_fit_percent"),
+            "%"
+        )
+        print(
+            "Edad de calibración:",
+            data.get("mag_calibration_age_s"),
+            "s"
+        )
+        break
+'
+
+
+COMO GUARDAR  LA CONFIGURACION PERMANENTEMENTE - este funciona solo con la recepcion de datos
+
+cd ~/PDM/BLUE_BOT/bluebot_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 service call \
+  /seatrac/settings/save \
+  std_srvs/srv/Trigger \
+  "{}"
+  
+
+
+
+COMPROBACION DE QUE LOS PARAMETROS SE GUARDARON CORRECTAMENTE - funciona con receptor y decodificador
+
+luisito@luisito-MSI:~/PDM/BLUE_BOT/bluebot_ws$ cd ~/PDM/BLUE_BOT/bluebot_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 topic echo /seatrac/status \
+  --once \
+  --field data \
+  --full-length | python3 -c '
+import sys
+import json
+
+for line in sys.stdin:
+    line = line.strip()
+
+    if line.startswith("{"):
+        data = json.loads(line)
+        print("Calibración válida:", data.get("mag_calibration_valid"))
+        print("Calidad:", data.get("mag_calibration_fit_percent"), "%")
+        print("Buffer:", data.get("mag_calibration_buffer_percent"), "%")
+        print("Edad:", data.get("mag_calibration_age_s"), "s")
+        break
+'
+Calibración válida: True
+Calidad: 89 %
+Buffer: 13 %
+Edad: 661 s
+luisito@luisito-MSI:~/PDM/BLUE_BOT/bluebot_ws$ 
+
+
+
+
+
+					INICIALIZACION DEL USBL LUEGO DE LA CALIBRACION
+			
+COMO SOLICITAR CONDICIONES DE TRABAJO INICIALES    -   mar de agua promedio 35.0 ppt
+
+python3 - <<'PY'
+import serial
+import time
+
+puerto = "/dev/ttyUSB0"
+comando = b"#15C1CF\r\n"
+
+try:
+    with serial.Serial(
+        port=puerto,
+        baudrate=115200,
+        bytesize=serial.EIGHTBITS,
+        parity=serial.PARITY_NONE,
+        stopbits=serial.STOPBITS_TWO,
+        timeout=0.2,
+        xonxoff=False,
+        rtscts=False,
+        dsrdtr=False,
+    ) as ser:
+
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
+
+        print(f"Puerto abierto: {puerto}")
+        print(f"Enviando consulta de configuración: {comando!r}")
+
+        ser.write(comando)
+        ser.flush()
+
+        limite = time.monotonic() + 3.0
+        respuesta = bytearray()
+
+        while time.monotonic() < limite:
+            datos = ser.read(512)
+
+            if datos:
+                respuesta.extend(datos)
+
+                if b"\r\n" in respuesta:
+                    break
+
+        if respuesta:
+            texto = respuesta.decode("ascii", errors="replace")
+            print("Respuesta:")
+            print(texto)
+            print("HEX ASCII:", respuesta.hex(" "))
+        else:
+            print("No se recibió respuesta.")
+
+except serial.SerialException as error:
+    print("Error serial:", error)
+PY
+
+
+
+ESTE CODIGO CAMBIA LA SALINIDAD A 0.0PPT  Y MANTIENE INTACTOS LOS DEMAS COMANDO
+INCLUSO LOS DE CALIBRACION - pasa que al ejecutar el siguiente codigo se registra completo
+TIENE EFECTO UNCAMENTE EN LA RAM - por ahora ....
+
+
+cd ~/PDM/BLUE_BOT/bluebot_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 run seatrac_ros2 seatrac_serial_node \
+  --ros-args \
+  -p port:=/dev/ttyUSB0 \
+  -p salinity_ppt:=0.0 \
+  -p auto_vos:=true \
+  -p auto_pressure_offset:=true
+  
+  
+
+
+ESTE COMANDO GUARDA ESAS VARIABLES PERO EN SU RAM
+  
+  
+cd ~/PDM/BLUE_BOT/bluebot_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+  
+  
+ros2 service call \
+  /seatrac/environment/apply \
+  std_srvs/srv/Trigger \
+  "{}"  
+  
+  
+  
+VERIFICAR VELOCIDAD DEL SONIDO EN AGUA DULCE ??? 
+- CONSEJOS
+EL USBL DEBE ESTAR FUERA DEL AGUA AL ENCENDERSE, DEJAR REPORSAR POR 10 SEGUNDO Y RECIEN INGRESAR AL AGUA 
+DE ESTA FORMA TOMA DE REFERENCIA LA PRESION DEL AIRE
+
+cd ~/PDM/BLUE_BOT/bluebot_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 topic echo /seatrac/status \
+  --once \
+  --field data \
+  --full-length | python3 -c '
+import sys
+import json
+
+for line in sys.stdin:
+    line = line.strip()
+
+    if line.startswith("{"):
+        data = json.loads(line)
+
+        print("Temperatura:", data.get("temperature_c"), "°C")
+        print("Profundidad:", data.get("depth_m"), "m")
+        print("Presión:", data.get("pressure_bar"), "bar")
+        print(
+            "Velocidad del sonido:",
+            data.get("sound_speed_m_s"),
+            "m/s"
+        )
+        break
+'
+
+PRUEBA PARA GUARDADO EN RAM LUEGO DE ENCENDER NUEVAMENTE EL USBL
+
+ros2 service call \
+  /seatrac/environment/apply \
+  std_srvs/srv/Trigger \
+  "{}"
+  
+  
+  
+ros2 topic echo /seatrac/status \
+  --once \
+  --field data \
+  --full-length | python3 -c '
+import sys
+import json
+
+for line in sys.stdin:
+    line = line.strip()
+
+    if line.startswith("{"):
+        data = json.loads(line)
+
+        print("Temperatura:", data.get("temperature_c"), "°C")
+        print("Profundidad:", data.get("depth_m"), "m")
+        print("Presión:", data.get("pressure_bar"), "bar")
+        print(
+            "Velocidad del sonido:",
+            data.get("sound_speed_m_s"),
+            "m/s"
+        )
+        break
+'
+
+COMO GUARDAR PERMANENTE MENTE 
+
+ros2 service call \
+  /seatrac/settings/save \
+  std_srvs/srv/Trigger \
+  "{}"
+
+
+
+  
+  LUEGO DE REINICIAR Y CARGAR TODOS LOS DATOS
+  SE VEREIFICA QUE SE HAYAN CARGADO CORRECTAMENTE
+  
+  
+cd ~/PDM/BLUE_BOT/bluebot_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 topic echo /seatrac/status \
+  --once \
+  --field data \
+  --full-length | python3 -c '
+import sys
+import json
+
+for line in sys.stdin:
+    line = line.strip()
+
+    if line.startswith("{"):
+        data = json.loads(line)
+
+        print("Temperatura:", data.get("temperature_c"), "°C")
+        print("Profundidad:", data.get("depth_m"), "m")
+        print("Presión:", data.get("pressure_bar"), "bar")
+        print(
+            "Velocidad del sonido:",
+            data.get("sound_speed_m_s"),
+            "m/s"
+        )
+        print(
+            "Calibración válida:",
+            data.get("mag_calibration_valid")
+        )
+        print(
+            "Calidad magnética:",
+            data.get("mag_calibration_fit_percent"),
+            "%"
+        )
+        break
+'
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

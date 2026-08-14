@@ -1,0 +1,121 @@
+
+
+							FORZAR IP
+
+sudo systemctl stop NetworkManager
+sudo ip addr add 192.168.2.50/24 dev enp3s0
+sudo ip link set dev enp3s0 up
+
+
+							HACER PING Y VER SI DETECTA - ROCKET M5
+
+ping -c 4 192.168.1.66
+
+
+							HACER PING Y VER SI DETECTA - NANO STATION M5
+
+ping -c 4 192.168.1.67
+
+
+							EN EL LAB
+							
+0 dbm							
+							
+							EN AFUERAS
+
+
+15 dbm
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

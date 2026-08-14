@@ -1,0 +1,326 @@
+								
+								
+					VERIFICAR RED
+
+ping 192.168.2.2
+
+
+					CREAR END POINT
+
+
+http://192.168.2.2
+
+
+Type: UDP Client
+IP: IP_de_tu_laptop
+Port: 14552
+
+MI IP  :  hostname -I
+
+
+					CAMBIO EN VELOCITY CONTROLER
+
+velocity_controller_node.py   ->   self.master = mavutil.mavlink_connection('udpin:0.0.0.0:14552')
+
+
+
+cd ~/PDM/bluerov2_real_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-select rov_control
+source install/setup.bash
+
+					ABRIR QGROUND CONTROL
+
+
+cd ~/Downloads
+./QGroundControl-x86_64.AppImage
+
+VEHICULO EN  ->  MANUAL    ARMED
+
+
+					CORRER NODO CONTROLADOR
+
+
+cd ~/PDM/bluerov2_real_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 run rov_control velocity_controller_node
+
+
+
+					CORRER NODO DE TECLADO TELEOP
+
+
+cd ~/PDM/bluerov2_real_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 run rov_control keyboard_teleop_node
+
+
+					CORRER NODO PUBLICADOR CAMARA
+
+
+cd ~/PDM/bluerov2_real_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 run bluerov2_camera video_publisher
+
+
+
+					VISUALIZAR IMAGEN
+
+cd ~/PDM/bluerov2_real_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 run rqt_image_view rqt_image_view /camera/image _image_transport:=compressed
+
+
+
+
+
+					CORRER IMAGEN PURA DEL BLUEROV2
+					
+
+gst-launch-1.0 -v udpsrc port=5601 ! application/x-rtp,media=video,clock-rate=90000,encoding-name=H264 ! rtpjitterbuffer mode=0 max-dropout-time=100 drop-on-latency=true latency=0 ! rtph264depay ! h264parse ! avdec_h264 qos=false ! videoconvert ! autovideosink sync=false
+
+
+
+					COMO AÑADIR IP's
+
+sudo nmcli con mod "Wired connection 1" ipv4.method manual
+sudo nmcli con mod "Wired connection 1" ipv4.addresses 192.168.2.1/24
+sudo nmcli con mod "Wired connection 1" ipv4.gateway ""
+sudo nmcli con mod "Wired connection 1" ipv4.dns ""
+sudo nmcli con mod "Wired connection 1" ipv4.never-default yes
+
+sudo nmcli con down "Wired connection 1"
+sudo nmcli con up "Wired connection 1"
+
+
+
+sudo nmcli con mod "Wired connection 1" ipv4.method manual
+sudo nmcli con mod "Wired connection 1" ipv4.addresses 192.168.1.1/24
+sudo nmcli con mod "Wired connection 1" ipv4.gateway ""
+sudo nmcli con mod "Wired connection 1" ipv4.dns ""
+sudo nmcli con mod "Wired connection 1" ipv4.never-default yes
+
+sudo nmcli con down "Wired connection 1"
+sudo nmcli con up "Wired connection 1"
+
+
+sudo nmcli con mod "Wired connection 1" ipv4.method manual
+sudo nmcli con mod "Wired connection 1" ipv4.addresses 192.168.194.90/24
+sudo nmcli con mod "Wired connection 1" ipv4.gateway ""
+sudo nmcli con mod "Wired connection 1" ipv4.dns ""
+sudo nmcli con mod "Wired connection 1" ipv4.never-default yes
+
+sudo nmcli con down "Wired connection 1"
+sudo nmcli con up "Wired connection 1"
+
+
+					LEER  BLUE ROBOTICS
+
+cd ~/Downloads
+
+rm -f ping-viewer-compat.AppImage
+
+URL=$(python3 - <<'PY'
+import json, urllib.request
+tag = "v2.3.4"
+api = f"https://api.github.com/repos/bluerobotics/ping-viewer/releases/tags/{tag}"
+data = json.load(urllib.request.urlopen(api))
+assets = data["assets"]
+candidates = [
+    a for a in assets
+    if "appimage" in a["name"].lower()
+    and not any(x in a["name"].lower() for x in ["arm", "aarch", "i386", "i686"])
+]
+if not candidates:
+    raise SystemExit("No encontré AppImage compatible")
+print(candidates[0]["browser_download_url"])
+PY
+)
+
+echo "$URL"
+
+wget -O ping-viewer-compat.AppImage "$URL"
+
+ls -lh ping-viewer-compat.AppImage
+file ping-viewer-compat.AppImage
+
+chmod +x ping-viewer-compat.AppImage
+./ping-viewer-compat.AppImage
+
+					VER EL PING360 EN RVIZ
+					
+
+source /opt/ros/humble/setup.bash
+source ~/PDM/bluerov2_real_ws/install/setup.bash
+
+ros2 run ping360_ros2 ping360_pointcloud_node --ros-args \
+  -p host:=192.168.2.2 \
+  -p port:=9092 \
+  -p range_m:=5.0 \
+  -p threshold:=25 \
+  -p angle_step:=4
+  
+  
+  
+  
+  
+Fixed Frame: ping360_link
+Add → By topic → /ping360/points → PointCloud2
+
+
+-------------------------------
+
+source /opt/ros/humble/setup.bash
+source ~/PDM/bluerov2_real_ws/install/setup.bash
+
+ros2 run ping360_ros2 ping360_pointcloud_node \
+  --ros-args \
+  -p threshold:=1
+
+						CORRER NODO FITRADOR DE PING360
+						
+source /opt/ros/humble/setup.bash
+source ~/PDM/bluerov2_real_ws/install/setup.bash
+
+ros2 run ping360_filter ping360_filter_node \
+  --ros-args \
+  -p input_topic:=/ping360/points \
+  -p output_topic:=/ping360/filtered_points \
+  -p first_return_only:=false
+
+						COMO VER EN RVIZ
+						
+source /opt/ros/humble/setup.bash
+source ~/PDM/bluerov2_real_ws/install/setup.bash
+
+rviz2
+
+Fixed Frame: ping360_link:  
+Topic: /ping360/points
+
+Filtrada:
+Topic: /ping360/filtered_points
+
+
+
+Style: Points
+Color Transformer: Intensity
+Channel Name: intensity
+Size: 0.02						
+						
+						
+
+						CORRER CONTROLADOR DE LA CAMARA DEL ROV2
+
+
+pkill -f QGroundControl
+
+source /opt/ros/humble/setup.bash
+source ~/PDM/bluerov2_real_ws/install/setup.bash
+
+ros2 run camera_control camera_tilt_controller_node --ros-args \
+  -p mavlink_url:=udpin:0.0.0.0:14550 \
+  -p channel:=8 \
+  -p timeout_s:=1.0
+  
+  
+  
+ 
+
+  
+  
+
+						CORRER TECLADO PARA CONTROLAR CAMARA
+
+
+
+
+
+source /opt/ros/humble/setup.bash
+source ~/PDM/bluerov2_real_ws/install/setup.bash
+
+ros2 run camera_control camera_keyboard_node
+
+
+
+						VER CAMARAAA
+
+ffplay -f v4l2 -input_format mjpeg -video_size 1920x1080 -framerate 30 /dev/video3
+
+						GRABACION CAMARAAA
+
+ffmpeg -f v4l2 -input_format mjpeg -video_size 1920x1080 -framerate 30 -i /dev/video4 -c:v copy "/home/luisito/PDM/vid_exploreHD/video_$(date +%Y%m%d_%H%M%S).mkv" -c:v rawvideo -pix_fmt yuv420p -f sdl2 "Camara BlueRobotics"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+cd ~/PDM/bluerov2_real_ws
+
+source /opt/ros/humble/setup.bash
+
+colcon build \
+  --packages-select ping360_ros2\
+  --symlink-install
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

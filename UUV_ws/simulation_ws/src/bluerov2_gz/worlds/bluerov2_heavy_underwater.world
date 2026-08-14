@@ -1,0 +1,713 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="bluerov2_heavy_underwater">
+
+    <!-- Base Gazebo plugins -->
+    <plugin
+        filename="gz-sim-physics-system"
+        name="gz::sim::systems::Physics">
+    </plugin>
+
+    <plugin
+        filename="gz-sim-user-commands-system"
+        name="gz::sim::systems::UserCommands">
+    </plugin>
+
+    <plugin
+        filename="gz-sim-scene-broadcaster-system"
+        name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+
+    <!-- IMU plugin manages all IMU sensors -->
+    <plugin
+        filename="libgz-sim-imu-system.so"
+        name="gz::sim::systems::Imu">
+    </plugin>
+
+    <!-- Sensors plugin manages lidar / camera / gpu sensors -->
+    <plugin
+        filename="gz-sim-sensors-system"
+        name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+
+    <!-- ===================================================== -->
+    <!-- AMBIENTE SUBMARINO VISUAL -->
+    <!-- ===================================================== -->
+
+    <scene>
+
+      <!-- iluminación ambiental -->
+      <ambient>0.05 0.09 0.12 1</ambient>
+
+      <!-- color del fondo -->
+      <background>0.02 0.10 0.16 1</background>
+
+      <shadows>true</shadows>
+
+      <!-- niebla submarina -->
+      <fog>
+        <type>linear</type>
+
+        <color>0.02 0.18 0.24 1</color>
+
+        <density>0.22</density>
+
+        <start>0.8</start>
+
+        <end>8.0</end>
+    </fog>
+
+    </scene>
+
+
+    <!-- Buoyancy plugin manages buoyancy for all models -->
+    <plugin
+        filename="gz-sim-buoyancy-system"
+        name="gz::sim::systems::Buoyancy">
+      <graded_buoyancy>
+        <default_density>1000</default_density>
+        <density_change>
+          <above_depth>0</above_depth>
+          <density>1</density>
+        </density_change>
+      </graded_buoyancy>
+      <enable>bluerov2_heavy</enable>
+    </plugin>
+
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Sun</uri>
+    </include>
+
+    <include>
+      <uri>model://sand_heightmap</uri>
+      <pose>0 7 -10 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>model://bluerov2_heavy</uri>
+      <pose>0 0 -2 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>model://axes</uri>
+      <pose>0 0 0.2 0 0 0</pose>
+    </include>
+
+
+    <!-- ===================================================== -->
+    <!-- OBSTÁCULOS DE PRUEBA -->
+    <!-- ===================================================== -->
+
+    <!-- Obstáculo frontal medio -->
+    <model name="obstacle_box_front">
+      <static>true</static>
+      <pose>-4 -4 -2 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>1.5 1.5 2.0</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.8 0.2 0.2 1</ambient>
+            <diffuse>0.8 0.2 0.2 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>1.5 1.5 2.0</size>
+            </box>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- Obstáculo lateral superficial -->
+    <model name="obstacle_wall_right">
+      <static>true</static>
+      <pose>-4 4 0 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>6.0 0.5 2.0</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.2 0.8 0.2 1</ambient>
+            <diffuse>0.2 0.8 0.2 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>6.0 0.5 2.0</size>
+            </box>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- Obstáculo profundo -->
+    <model name="obstacle_box_left">
+      <static>true</static>
+      <pose>-4 -4 -5 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>2.0 2.0 2.0</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.2 0.2 0.8 1</ambient>
+            <diffuse>0.2 0.2 0.8 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>2.0 2.0 2.0</size>
+            </box>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+
+    <!-- ===================================================== -->
+    <!-- TUBERÍA SUBMARINA TASK 2 -->
+    <!-- Suspendida aproximadamente 1-2 m sobre el fondo -->
+    <!-- ===================================================== -->
+
+    <!-- Tubería submarina: tramo recto principal -->
+    <model name="pipeline_straight">
+      <static>true</static>
+      <pose>14 0 -2 0 1.5708 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.25</radius>
+              <length>11.2</length>
+            </cylinder>
+          </geometry>
+
+          <material>
+            <ambient>0.9 0.45 0.1 1</ambient>
+            <diffuse>0.9 0.45 0.1 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <cylinder>
+              <radius>0.25</radius>
+              <length>11.2</length>
+            </cylinder>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- Tubería submarina: giro hacia la derecha -->
+    <model name="pipeline_right">
+      <static>true</static>
+      <pose>20.4 -3 -2 1.5708 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.25</radius>
+              <length>6.0</length>
+            </cylinder>
+          </geometry>
+
+          <material>
+            <ambient>0.9 0.45 0.1 1</ambient>
+            <diffuse>0.9 0.45 0.1 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <cylinder>
+              <radius>0.25</radius>
+              <length>6.0</length>
+            </cylinder>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- Tubería submarina: giro hacia la izquierda -->
+    <model name="pipeline_left">
+      <static>true</static>
+      <pose>8 3 -2.15 1.5708 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.25</radius>
+              <length>6.0</length>
+            </cylinder>
+          </geometry>
+
+          <material>
+            <ambient>0.9 0.45 0.1 1</ambient>
+            <diffuse>0.9 0.45 0.1 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <cylinder>
+              <radius>0.25</radius>
+              <length>6.0</length>
+            </cylinder>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- Tramo elevado para probar seguimiento con cambio de altura -->
+    <model name="pipeline_elevated">
+      <static>true</static>
+      <pose>24 -3 -1.25 0.05 1.5708 0.03</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.25</radius>
+              <length>5.0</length>
+            </cylinder>
+          </geometry>
+
+          <material>
+            <ambient>0.95 0.55 0.15 1</ambient>
+            <diffuse>0.95 0.55 0.15 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <cylinder>
+              <radius>0.25</radius>
+              <length>5.0</length>
+            </cylinder>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+
+    <!-- ===================================================== -->
+    <!-- SOPORTES DE TUBERÍA -->
+    <!-- ===================================================== -->
+
+    <model name="pipeline_support_1">
+      <static>true</static>
+      <pose>10 0 -2.8 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.4 0.4 1.2</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.3 0.3 0.3 1</ambient>
+            <diffuse>0.3 0.3 0.3 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.4 0.4 1.2</size>
+            </box>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="pipeline_support_2">
+      <static>true</static>
+      <pose>14 0 -2.8 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.4 0.4 1.2</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.3 0.3 0.3 1</ambient>
+            <diffuse>0.3 0.3 0.3 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.4 0.4 1.2</size>
+            </box>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="pipeline_support_3">
+      <static>true</static>
+      <pose>18 0 -2.8 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.4 0.4 1.2</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.3 0.3 0.3 1</ambient>
+            <diffuse>0.3 0.3 0.3 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.4 0.4 1.2</size>
+            </box>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+
+    <!-- ===================================================== -->
+    <!-- LUCES DE ESTADO DE TUBERÍA - TASK 2 -->
+    <!-- GREEN = funcional, RED = dañada -->
+    <!-- ===================================================== -->
+
+    <!-- Segmento 1: GREEN -->
+    <model name="pipeline_light_green_1">
+      <static>true</static>
+      <pose>9 0 -1.72 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <sphere>
+              <radius>0.14</radius>
+            </sphere>
+          </geometry>
+
+          <material>
+            <ambient>0.0 1.0 0.0 1</ambient>
+            <diffuse>0.0 1.0 0.0 1</diffuse>
+            <emissive>0.0 1.0 0.0 1</emissive>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <sphere>
+              <radius>0.14</radius>
+            </sphere>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- Segmento 2: GREEN -->
+    <model name="pipeline_light_green_2">
+      <static>true</static>
+      <pose>13 0 -1.72 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <sphere>
+              <radius>0.14</radius>
+            </sphere>
+          </geometry>
+
+          <material>
+            <ambient>0.0 1.0 0.0 1</ambient>
+            <diffuse>0.0 1.0 0.0 1</diffuse>
+            <emissive>0.0 1.0 0.0 1</emissive>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <sphere>
+              <radius>0.14</radius>
+            </sphere>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- Segmento 3: RED / zona dañada -->
+    <model name="pipeline_light_red_damage">
+      <static>true</static>
+      <pose>16 0 -1.70 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <sphere>
+              <radius>0.18</radius>
+            </sphere>
+          </geometry>
+
+          <material>
+            <ambient>1.0 0.0 0.0 1</ambient>
+            <diffuse>1.0 0.0 0.0 1</diffuse>
+            <emissive>1.0 0.0 0.0 1</emissive>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <sphere>
+              <radius>0.18</radius>
+            </sphere>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- Segmento 4: GREEN -->
+    <model name="pipeline_light_green_3">
+      <static>true</static>
+      <pose>19 0 -1.72 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <sphere>
+              <radius>0.14</radius>
+            </sphere>
+          </geometry>
+
+          <material>
+            <ambient>0.0 1.0 0.0 1</ambient>
+            <diffuse>0.0 1.0 0.0 1</diffuse>
+            <emissive>0.0 1.0 0.0 1</emissive>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <sphere>
+              <radius>0.14</radius>
+            </sphere>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- Marcador físico de reparación cerca del segmento RED -->
+    <model name="pipeline_repair_zone">
+      <static>true</static>
+      <pose>16 0.8 -1.55 0 0 0.4</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.5 0.08 0.35</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>1.0 0.0 0.0 1</ambient>
+            <diffuse>1.0 0.0 0.0 1</diffuse>
+            <emissive>0.5 0.0 0.0 1</emissive>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.5 0.08 0.35</size>
+            </box>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+
+    <!-- ===================================================== -->
+    <!-- SUPERFICIE VISUAL DEL AGUA -->
+    <!-- ===================================================== -->
+
+    <model name="water_surface_visual">
+      <static>true</static>
+      <pose>0 0 0.05 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>120 120 0.02</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.0 0.35 0.7 0.28</ambient>
+            <diffuse>0.0 0.35 0.7 0.28</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+
+    <!-- ===================================================== -->
+    <!-- LÍMITES DEL ESCENARIO -->
+    <!-- ===================================================== -->
+
+    <model name="world_boundary_front">
+      <static>true</static>
+      <pose>38 0 -3 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.5 80 8</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.1 0.1 0.1 0.15</ambient>
+            <diffuse>0.1 0.1 0.1 0.15</diffuse>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.5 80 8</size>
+            </box>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="world_boundary_left">
+      <static>true</static>
+      <pose>0 40 -3 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>80 0.5 8</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.1 0.1 0.1 0.15</ambient>
+            <diffuse>0.1 0.1 0.1 0.15</diffuse>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>80 0.5 8</size>
+            </box>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="world_boundary_right">
+      <static>true</static>
+      <pose>0 -40 -3 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>80 0.5 8</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.1 0.1 0.1 0.15</ambient>
+            <diffuse>0.1 0.1 0.1 0.15</diffuse>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>80 0.5 8</size>
+            </box>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+
+    <!-- ===================================================== -->
+    <!-- MARCADOR DE FIN DE INSPECCIÓN -->
+    <!-- ===================================================== -->
+
+    <model name="inspection_target">
+      <static>true</static>
+      <pose>27 -3 -1 0 0 0</pose>
+
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <sphere>
+              <radius>0.14</radius>
+            </sphere>
+          </geometry>
+
+          <material>
+            <ambient>1.0 1.0 0.1 1</ambient>
+            <diffuse>1.0 1.0 0.1 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="collision">
+          <geometry>
+            <sphere>
+              <radius>0.14</radius>
+            </sphere>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+  </world>
+</sdf>

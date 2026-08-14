@@ -1,0 +1,162 @@
+						GAZEBO
+cd ~/PDM/bluerov2_ws
+
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+export GZ_SIM_RESOURCE_PATH=~/PDM/bluerov2_ws/src/bluerov2_gz/models:~/PDM/bluerov2_ws/src/bluerov2_gz/worlds
+
+export GZ_SIM_SYSTEM_PLUGIN_PATH=~/PDM/bluerov2_ws/install/ardupilot_gazebo/lib/ardupilot_gazebo
+
+gz sim -v 4 -r ~/PDM/bluerov2_ws/src/bluerov2_gz/worlds/bluerov2_heavy_underwater.world
+
+						ARDUSUB
+
+cd ~/ardupilot
+
+Tools/autotest/sim_vehicle.py \
+-L RATBeach \
+-v ArduSub \
+-f vectored_6dof \
+--model=JSON \
+--out=udp:127.0.0.1:14550 \
+--out=udp:127.0.0.1:14551 \
+--out=udp:127.0.0.1:14552 \
+--out=udp:127.0.0.1:14553 \
+--console
+
+						GROUND CONTROL
+
+cd ~/Downloads
+./QGroundControl-x86_64.AppImage
+
+
+						DVL FAKE
+
+source /opt/ros/humble/setup.bash
+source ~/PDM/bluerov2_ws/install/setup.bash
+
+ros2 run fake_dvl fake_dvl_node
+
+						CONTROLADOR ROV
+
+source /opt/ros/humble/setup.bash
+source ~/PDM/bluerov2_ws/install/setup.bash
+
+ros2 run rov_control velocity_controller_node
+
+						TECLADO TELEOP
+
+source /opt/ros/humble/setup.bash
+source ~/PDM/bluerov2_ws/install/setup.bash
+
+ros2 run rov_control keyboard_teleop_node
+
+						PUENTE  BRIDGE
+
+source /opt/ros/humble/setup.bash
+source ~/PDM/bluerov2_ws/install/setup.bash
+
+ros2 run fake_ping360 gz_ping360_text_bridge
+
+
+						RVIZ
+			
+source /opt/ros/humble/setup.bash
+source ~/PDM/bluerov2_ws/install/setup.bash
+
+rviz2
+
+						TF DEL SONAR
+
+source /opt/ros/humble/setup.bash
+
+ros2 run tf2_ros static_transform_publisher \
+0 0 0 0 0 0 base_link ping360_gz_link
+
+						NODO DEL PIPELINE_PERCEPTION    MIDE PUNTOS CERCANOS DEL PING360
+
+
+cd ~/PDM/bluerov2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 run pipeline_perception pipeline_detector_node
+
+
+						NODO DEL SEGUIDOR DE TUBERÌA
+
+cd ~/PDM/bluerov2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 run pipeline_perception pipeline_follower_node
+
+cd ~/PDM/bluerov2_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-select pipeline_perception
+source install/setup.bash
+
+
+
+						CAMARA  BRIDGE
+
+
+cd ~/PDM/bluerov2_ws
+
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+
+ros2 run fake_camera gz_camera_bridge
+
+						VER CAMARA  /bluerov2/front_camera/image_raw      /bluerov2/front_camera/color_debug
+
+
+cd ~/PDM/bluerov2_ws
+
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 run rqt_image_view rqt_image_view
+
+ros2 run fake_camera pipeline_color_detector_node
+
+
+						MANEJADOR DE LA MISION
+
+
+source /opt/ros/humble/setup.bash
+source ~/PDM/bluerov2_ws/install/setup.bash
+
+ros2 run pipeline_perception pipeline_mission_manager_node
+
+cd ~/PDM/bluerov2_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-select pipeline_perception
+source install/setup.bash
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
