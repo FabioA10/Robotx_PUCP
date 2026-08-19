@@ -37,7 +37,7 @@ The repository is organized by robotic platform and software functionality in or
 | Platform | Vehicle | Purpose | Status |
 |:---:|---|---|:---:|
 | **USV** | Blue Robotics **BlueBoat** | Autonomous surface navigation and RobotX mission execution | 🟡 Development |
-| **UUV** | Blue Robotics **BlueROV2 Heavy** | Underwater perception, inspection and autonomous missions | 🟢 Real + Simulation |
+| **UUV** | Blue Robotics **BlueROV2 Heavy** | Underwater perception, inspection, teleoperation and autonomous missions | 🟢 Real + Simulation |
 | **UAV** | Platform TBD | Aerial support for RobotX missions | ⚪ Platform selection |
 
 **Status:**  
@@ -81,8 +81,16 @@ Robotx_PUCP/
 │   ├── real_ws/
 │   │   └── src/
 │   │       ├── bringup/
+│   │       │   └── uuv_bringup/
 │   │       ├── control/
+│   │       │   ├── camera_control/
+│   │       │   ├── rov_control/
+│   │       │   └── uuv_teleop/
 │   │       ├── drivers/
+│   │       │   ├── bluerov2_camera/
+│   │       │   ├── ping360_ros2/
+│   │       │   ├── seatrac_ros2/
+│   │       │   └── uuv_mavlink/
 │   │       ├── experimental/
 │   │       ├── perception/
 │   │       ├── tasks/
@@ -176,22 +184,32 @@ This allows the physical vehicle and the simulated vehicle to evolve independent
 ```text
 UUV_ws/real_ws/src/
 ├── bringup/
+│   └── uuv_bringup/
 ├── control/
+│   ├── camera_control/
+│   ├── rov_control/
+│   └── uuv_teleop/
 ├── drivers/
+│   ├── bluerov2_camera/
+│   ├── ping360_ros2/
+│   ├── seatrac_ros2/
+│   └── uuv_mavlink/
 ├── experimental/
 ├── perception/
 ├── tasks/
 └── third_party/
 ```
 
-### Bringup
+---
+
+## UUV Bringup
 
 ```text
 bringup/
 └── uuv_bringup/
 ```
 
-The `uuv_bringup` package provides launch files used to start multiple BlueROV2 subsystems from a single command.
+The `uuv_bringup` package provides a centralized launch file for the physical BlueROV2 Heavy.
 
 Current real-hardware bringup includes support for:
 
@@ -201,7 +219,12 @@ Current real-hardware bringup includes support for:
 - SeaTrac status processing
 - BlueROV2 video stream
 - Camera tilt control
-- ROV velocity control
+- MAVLink telemetry
+- Xbox teleoperation
+- MAVLink manual control
+- ARM/DISARM control
+- Acoustic armed-state feedback
+- Legacy ROV velocity control
 
 Individual subsystems can be enabled or disabled using ROS 2 launch arguments.
 
@@ -213,7 +236,8 @@ Individual subsystems can be enabled or disabled using ROS 2 launch arguments.
 drivers/
 ├── bluerov2_camera/
 ├── ping360_ros2/
-└── seatrac_ros2/
+├── seatrac_ros2/
+└── uuv_mavlink/
 ```
 
 ### `bluerov2_camera`
@@ -238,6 +262,85 @@ Current functionality includes:
 - Environment configuration
 - Persistent device settings
 
+### `uuv_mavlink`
+
+ROS 2 ↔ MAVLink interface for the physical BlueROV2 Heavy.
+
+The current implementation communicates with BlueOS/ArduSub through UDP port `14552` and provides both telemetry and guarded manual-control transmission.
+
+Current tested MAVLink configuration:
+
+```text
+UDP port             14552
+ROS source SYSID     255
+Vehicle SYSID        1
+Autopilot COMPID     1
+ArduSub              4.5.7
+```
+
+Main telemetry topics:
+
+```text
+/uuv/connected
+/uuv/armed
+/uuv/mode
+/uuv/power/voltage
+/uuv/power/current
+/uuv/power/motors_enabled
+```
+
+Control/safety topics:
+
+```text
+/uuv/control/command_output_enabled
+/uuv/control/mavlink_motion_allowed
+/uuv/control/arm_request
+/uuv/control/disarm_request
+```
+
+The propulsion-power state is inferred from the measured propulsion bus voltage. It is not a direct digital reading of the physical killswitch.
+
+Current hysteresis thresholds:
+
+```text
+Voltage >= 10 V   -> propulsion power enabled
+Voltage <= 5 V    -> propulsion power disabled
+5 V ... 10 V      -> preserve previous state
+```
+
+The bridge transmits `MANUAL_CONTROL` at 20 Hz when command output is explicitly enabled.
+
+Physical motion is allowed only when all of the following conditions are satisfied:
+
+```text
+MAVLink connected
+AND propulsion power enabled
+AND RB deadman active
+AND manual command is recent
+AND vehicle is armed
+AND vehicle mode is MANUAL
+```
+
+The manual command watchdog currently uses a `0.30 s` timeout.
+
+`command_output` is disabled by default.
+
+`arm_control` is also disabled by default.
+
+### `manual_control_preview_node`
+
+A non-actuating diagnostic node is included to validate the ROS command path and the conversion to MAVLink-style manual-control values without transmitting commands to ArduSub.
+
+It publishes:
+
+```text
+/uuv/control/manual_control_preview
+/uuv/control/input_valid
+/uuv/control/motion_allowed
+```
+
+This node is useful for controller testing and safety validation before enabling physical actuation.
+
 ---
 
 ## UUV Control
@@ -245,12 +348,69 @@ Current functionality includes:
 ```text
 control/
 ├── camera_control/
-└── rov_control/
+├── rov_control/
+└── uuv_teleop/
 ```
+
+### `uuv_teleop`
+
+Xbox-based manual teleoperation interface for the physical BlueROV2.
+
+Current controller mapping:
+
+| Control | Function |
+|---|---|
+| **RB (hold)** | Motion deadman |
+| **X + RB (hold 1.5 s)** | ARM request |
+| **B** | Immediate DISARM request |
+| Left stick vertical | Forward / backward |
+| Left stick horizontal | Left / right |
+| Right stick horizontal | Yaw |
+| RT | Up |
+| LT | Down |
+
+The node publishes:
+
+```text
+/joy
+        ↓
+xbox_teleop_node
+        ├── /uuv/cmd_vel_manual
+        ├── /uuv/deadman
+        ├── /uuv/control/arm_request
+        └── /uuv/control/disarm_request
+```
+
+When RB is released, `/uuv/cmd_vel_manual` returns to a neutral command.
+
+If joystick messages stop arriving, the command watchdog in the MAVLink bridge prevents stale motion commands from remaining active.
+
+### Acoustic armed-state feedback
+
+The `audio_feedback_node` subscribes to:
+
+```text
+/uuv/armed
+```
+
+and plays different tones when ArduSub confirms an actual armed-state transition:
+
+```text
+DISARMED -> ARMED     startup / ascending tone
+ARMED -> DISARMED     shutdown / descending tone
+```
+
+The sound is generated only after the state reported by the autopilot changes. An ARM request that is rejected by ArduSub therefore does not produce the armed tone.
+
+Audio playback currently uses `paplay` on the operator computer.
 
 ### `rov_control`
 
-Contains BlueROV2 motion-control and teleoperation-related nodes.
+Contains the previous/direct BlueROV2 velocity-control and teleoperation-related nodes.
+
+The current Xbox/MAVLink path is implemented through `uuv_teleop` + `uuv_mavlink`.
+
+> **Important:** Do not intentionally run multiple independent manual-control paths at the same time. In particular, avoid enabling the legacy `rov_control` actuation path while the new MAVLink Xbox command output is active.
 
 ### `camera_control`
 
@@ -442,7 +602,7 @@ The UAV hardware and software architecture will be incorporated once the final a
 | Operating System | Ubuntu |
 | Languages | Python, C++ |
 | Autopilot | ArduPilot / ArduSub |
-| Communication | MAVLink / MAVROS |
+| Communication | MAVLink / pymavlink / MAVROS |
 | Simulation | Gazebo |
 | Computer Vision | OpenCV |
 | Build System | colcon |
@@ -507,6 +667,7 @@ After building:
 cd ~/ROS2/ROBOT_X_IMPLEMENTATION/Robotx_PUCP/UUV_ws/real_ws
 
 source /opt/ros/humble/setup.bash
+
 source install/setup.bash
 ```
 
@@ -516,18 +677,24 @@ The main UUV launch file is:
 ros2 launch uuv_bringup uuv_real.launch.py
 ```
 
-By default, the launch starts the main sensing systems while keeping vehicle motion control disabled.
+By default, the launch starts sensing and MAVLink telemetry while keeping manual actuation and ARM/DISARM control disabled.
 
 Current default behavior:
 
 ```text
-Ping360 acquisition    ON
-Ping360 filtering      ON
-SeaTrac USBL           ON
-BlueROV2 camera        ON
+Ping360 acquisition          ON
+Ping360 filtering            ON
+SeaTrac USBL                 ON
+BlueROV2 camera              ON
+MAVLink telemetry            ON
 
-ROV velocity control   OFF
-Camera tilt control    OFF
+Xbox teleoperation           OFF
+MAVLink command output       OFF
+Xbox ARM/DISARM control      OFF
+ROV legacy velocity control  OFF
+Camera tilt control          OFF
+
+Manual command scale         0.20
 ```
 
 ---
@@ -549,6 +716,12 @@ camera
 control
 camera_tilt
 
+telemetry
+xbox
+command_output
+command_scale
+arm_control
+
 usbl_port
 ping360_host
 ping360_port
@@ -558,10 +731,69 @@ ping360_angle_step
 mavlink_url
 ```
 
-Example: start only the Ping360 subsystem:
+### Telemetry-only MAVLink test
 
 ```bash
 ros2 launch uuv_bringup uuv_real.launch.py \
+  telemetry:=true \
+  xbox:=false \
+  command_output:=false \
+  arm_control:=false \
+  sonar:=false \
+  usbl:=false \
+  camera:=false \
+  control:=false \
+  camera_tilt:=false
+```
+
+### Xbox + telemetry, without physical command output
+
+```bash
+ros2 launch uuv_bringup uuv_real.launch.py \
+  telemetry:=true \
+  xbox:=true \
+  command_output:=false \
+  arm_control:=false \
+  sonar:=false \
+  usbl:=false \
+  camera:=false \
+  control:=false \
+  camera_tilt:=false
+```
+
+### Xbox control of the physical BlueROV2
+
+```bash
+ros2 launch uuv_bringup uuv_real.launch.py \
+  telemetry:=true \
+  xbox:=true \
+  command_output:=true \
+  arm_control:=true \
+  command_scale:=0.30 \
+  sonar:=false \
+  usbl:=false \
+  camera:=false \
+  control:=false \
+  camera_tilt:=false
+```
+
+The command scale limits the maximum manual command:
+
+```text
+command_scale:=0.10   10 %
+command_scale:=0.30   30 %
+command_scale:=0.50   50 %
+command_scale:=1.00   full MANUAL_CONTROL range
+```
+
+For initial physical tests, use a reduced scale and increase it progressively after validating all axes and directions.
+
+### Ping360 only
+
+```bash
+ros2 launch uuv_bringup uuv_real.launch.py \
+  telemetry:=false \
+  xbox:=false \
   sonar:=true \
   usbl:=false \
   camera:=false \
@@ -569,10 +801,12 @@ ros2 launch uuv_bringup uuv_real.launch.py \
   camera_tilt:=false
 ```
 
-Example: start only the SeaTrac USBL:
+### SeaTrac USBL only
 
 ```bash
 ros2 launch uuv_bringup uuv_real.launch.py \
+  telemetry:=false \
+  xbox:=false \
   sonar:=false \
   usbl:=true \
   camera:=false \
@@ -580,10 +814,12 @@ ros2 launch uuv_bringup uuv_real.launch.py \
   camera_tilt:=false
 ```
 
-Example: start only the BlueROV2 camera:
+### BlueROV2 camera only
 
 ```bash
 ros2 launch uuv_bringup uuv_real.launch.py \
+  telemetry:=false \
+  xbox:=false \
   sonar:=false \
   usbl:=false \
   camera:=true \
@@ -591,26 +827,72 @@ ros2 launch uuv_bringup uuv_real.launch.py \
   camera_tilt:=false
 ```
 
-Example: sensing stack without vehicle actuation:
-
-```bash
-ros2 launch uuv_bringup uuv_real.launch.py \
-  sonar:=true \
-  usbl:=true \
-  camera:=true \
-  control:=false \
-  camera_tilt:=false
-```
-
-> **Safety note:**  
-> Vehicle motion control is intentionally disabled by default.  
-> Enable physical actuation only when the vehicle is prepared for testing.
+> **Safety notes**
+>
+> - Physical MAVLink command output is disabled by default.
+> - Xbox ARM/DISARM is disabled by default.
+> - Keep the physical killswitch accessible during hardware testing.
+> - Do not use the legacy `rov_control` actuation path simultaneously with the new `uuv_mavlink` manual-control path.
+> - Avoid having QGroundControl joystick control and ROS 2 joystick control command the vehicle simultaneously.
+> - The propulsion-power topic indicates the measured propulsion bus state; it does not replace the physical emergency stop.
 
 ---
 
 # UUV Important Individual Nodes
 
-Although the bringup package is the preferred way to start the real UUV, individual nodes can still be executed during debugging.
+Although `uuv_bringup` is the preferred way to start the real UUV, individual nodes can still be executed during debugging.
+
+## Xbox Teleoperation
+
+```bash
+ros2 run joy game_controller_node
+```
+
+```bash
+ros2 run uuv_teleop xbox_teleop_node
+```
+
+Useful topics:
+
+```bash
+ros2 topic echo /uuv/deadman
+ros2 topic echo /uuv/cmd_vel_manual
+```
+
+## Armed-State Audio Feedback
+
+```bash
+ros2 run uuv_teleop audio_feedback_node
+```
+
+The node listens to `/uuv/armed` and generates different startup/shutdown tones after confirmed state changes.
+
+## MAVLink Bridge
+
+Read-only/default execution:
+
+```bash
+ros2 run uuv_mavlink mavlink_bridge_node
+```
+
+Useful status topics:
+
+```bash
+ros2 topic echo /uuv/connected
+ros2 topic echo /uuv/armed
+ros2 topic echo /uuv/mode
+ros2 topic echo /uuv/power/voltage
+ros2 topic echo /uuv/power/current
+ros2 topic echo /uuv/power/motors_enabled
+```
+
+## MANUAL_CONTROL Preview
+
+```bash
+ros2 run uuv_mavlink manual_control_preview_node
+```
+
+This node does not transmit MAVLink commands. It can be used to inspect the generated `[x, y, z, r]` values before physical actuation.
 
 ## Ping360
 
@@ -632,8 +914,6 @@ ros2 run ping360_filter ping360_filter_node --ros-args \
   -p first_return_only:=false
 ```
 
----
-
 ## SeaTrac USBL
 
 Serial communication:
@@ -650,8 +930,6 @@ Status decoder:
 ros2 run seatrac_ros2 seatrac_status_node
 ```
 
----
-
 ## BlueROV2 Camera
 
 ```bash
@@ -664,9 +942,7 @@ The camera image can be inspected using:
 ros2 run rqt_image_view rqt_image_view
 ```
 
----
-
-## BlueROV2 Motion Control
+## Legacy BlueROV2 Motion Control
 
 ```bash
 ros2 run rov_control velocity_controller_node
@@ -679,8 +955,6 @@ ros2 run rov_control keyboard_teleop_node
 ```
 
 > Manual keyboard teleoperation is intentionally kept separate from the main bringup because it requires an interactive terminal.
-
----
 
 ## Camera Tilt Control
 
@@ -698,6 +972,92 @@ ros2 run camera_control camera_keyboard_node
 
 ---
 
+# UUV Manual-Control Safety Architecture
+
+The current real-UUV manual-control path is:
+
+```text
+Xbox Controller
+      │
+      ▼
+game_controller_node
+      │
+     /joy
+      │
+      ▼
+xbox_teleop_node
+      │
+      ├── /uuv/deadman
+      ├── /uuv/cmd_vel_manual
+      ├── /uuv/control/arm_request
+      └── /uuv/control/disarm_request
+                   │
+                   ▼
+          uuv_mavlink_bridge
+                   │
+        ┌──────────┴──────────┐
+        │ Safety supervision  │
+        │                     │
+        │ MAVLink heartbeat   │
+        │ propulsion power    │
+        │ RB deadman          │
+        │ command watchdog    │
+        │ ARMED state         │
+        │ MANUAL mode         │
+        └──────────┬──────────┘
+                   │
+                   ▼
+          MAVLink MANUAL_CONTROL
+                   │
+                   ▼
+                ArduSub
+                   │
+                   ▼
+            BlueROV2 Heavy
+```
+
+ARM/DISARM path:
+
+```text
+X + RB for 1.5 s
+        │
+        ▼
+    ARM request
+        │
+        ▼
+MAV_CMD_COMPONENT_ARM_DISARM
+        │
+        ▼
+     ArduSub
+        │
+        ▼
+ /uuv/armed = true
+        │
+        ▼
+ startup audio tone
+```
+
+```text
+B
+│
+▼
+DISARM request
+│
+▼
+MAV_CMD_COMPONENT_ARM_DISARM
+│
+▼
+ArduSub
+│
+▼
+/uuv/armed = false
+│
+▼
+shutdown audio tone
+```
+
+---
+
 # UUV Simulation — Important Nodes
 
 Build and source the simulation workspace:
@@ -706,6 +1066,7 @@ Build and source the simulation workspace:
 cd ~/ROS2/ROBOT_X_IMPLEMENTATION/Robotx_PUCP/UUV_ws/simulation_ws
 
 source /opt/ros/humble/setup.bash
+
 source install/setup.bash
 ```
 
@@ -763,6 +1124,7 @@ Build and source the USV workspace:
 cd ~/ROS2/ROBOT_X_IMPLEMENTATION/Robotx_PUCP/USV_ws
 
 source /opt/ros/humble/setup.bash
+
 source install/setup.bash
 ```
 
@@ -810,6 +1172,7 @@ RobotX
 │   ├── Drivers
 │   ├── Perception
 │   ├── Control
+│   ├── Safety
 │   └── Tasks
 │
 └── UAV Bringup
@@ -842,7 +1205,7 @@ The current repository structure is designed to support future development inclu
 - Vehicle-specific bringup packages
 - Manual/autonomous command arbitration
 - Mission state machines
-- Safety and failsafe supervision
+- Higher-level safety and failsafe supervision
 - Common RobotX interfaces
 - Autonomous mission execution
 - Real/simulation interchangeability
@@ -858,9 +1221,10 @@ The current repository structure is designed to support future development inclu
 | Hardware integration | 🟡 | 🟢 | ⚪ |
 | Teleoperation | 🟢 | 🟢 | ⚪ |
 | Motion control | 🟢 | 🟢 | ⚪ |
+| MAVLink telemetry/control | 🟡 | 🟢 | ⚪ |
 | Perception | 🟡 | 🟢 | ⚪ |
 | Simulation | 🟡 | 🟢 | ⚪ |
-| Bringup | 🟡 | 🟡 | ⚪ |
+| Bringup | 🟡 | 🟢 | ⚪ |
 | Autonomous missions | 🟡 | 🟡 | ⚪ |
 | Multi-vehicle integration | ⚪ | ⚪ | ⚪ |
 

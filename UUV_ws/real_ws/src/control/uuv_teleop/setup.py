@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'xbox_teleop_node = uuv_teleop.xbox_teleop_node:main',
+            'audio_feedback_node = uuv_teleop.audio_feedback_node:main',
         ],
     },
 )

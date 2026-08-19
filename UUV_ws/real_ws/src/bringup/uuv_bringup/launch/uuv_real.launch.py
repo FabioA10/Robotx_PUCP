@@ -27,6 +27,13 @@ def generate_launch_description():
     ping360_angle_step = LaunchConfiguration('ping360_angle_step')
 
     mavlink_url = LaunchConfiguration('mavlink_url')
+    
+    command_output = LaunchConfiguration('command_output')
+    command_scale = LaunchConfiguration('command_scale')
+
+    telemetry = LaunchConfiguration('telemetry')
+    xbox = LaunchConfiguration('xbox')
+    arm_control = LaunchConfiguration('arm_control')
 
     return LaunchDescription([
 
@@ -110,6 +117,107 @@ def generate_launch_description():
             description='MAVLink endpoint used by vehicle control'
         ),
 
+        DeclareLaunchArgument(
+            'telemetry',
+            default_value='true',
+            description='Start UUV MAVLink bridge'
+        ),
+
+        DeclareLaunchArgument(
+            'xbox',
+            default_value='false',
+            description='Start Xbox controller and UUV teleoperation node'
+        ),
+        DeclareLaunchArgument(
+            'command_output',
+            default_value='false',
+            description='Enable MAVLink MANUAL_CONTROL transmission'
+        ),
+
+        DeclareLaunchArgument(
+            'command_scale',
+            default_value='0.20',
+            description='Maximum MANUAL_CONTROL command scale'
+        ),
+        
+        DeclareLaunchArgument(
+            'arm_control',
+            default_value='false',
+            description='Enable Xbox ARM/DISARM commands through MAVLink'
+        ),        
+        
+                
+        # ==============================================================
+        # MAVLINK TELEMETRY
+        #
+        # Read-only vehicle telemetry:
+        #   /uuv/connected
+        #   /uuv/armed
+        #   /uuv/mode
+        #   /uuv/power/voltage
+        #   /uuv/power/current
+        #   /uuv/power/motors_enabled
+        # ==============================================================
+
+        Node(
+            package='uuv_mavlink',
+            executable='mavlink_bridge_node',
+            name='uuv_mavlink_bridge',
+            output='screen',
+            condition=IfCondition(telemetry),
+            parameters=[{
+                'udp_port': 14552,
+                'source_system_id': 255,
+                'target_system_id': 1,
+                'target_component_id': 1,
+                'heartbeat_timeout': 3.0,
+                'motor_power_on_threshold': 10.0,
+                'motor_power_off_threshold': 5.0,
+                'enable_command_output': command_output,
+                'command_scale': command_scale,
+                'enable_arm_disarm': arm_control,
+            }],
+        ),
+                
+        # ==============================================================
+        # XBOX TELEOPERATION
+        #
+        # Xbox -> /joy -> xbox_teleop_node
+        #      -> /uuv/cmd_vel_manual
+        #
+        # IMPORTANT:
+        # /uuv/cmd_vel_manual is NOT connected to ArduSub yet.
+        # ==============================================================
+
+        Node(
+            package='joy',
+            executable='game_controller_node',
+            name='xbox_controller',
+            output='screen',
+            condition=IfCondition(xbox),
+        ),
+
+        Node(
+            package='uuv_teleop',
+            executable='xbox_teleop_node',
+            name='xbox_teleop',
+            output='screen',
+            condition=IfCondition(xbox),
+        ),
+        
+        Node(
+            package='uuv_teleop',
+            executable='audio_feedback_node',
+            name='uuv_audio_feedback',
+            output='screen',
+            condition=IfCondition(xbox),
+            parameters=[{
+                'enabled': True,
+                'volume': 0.35,
+            }],
+        ),
+        
+                
         # ==============================================================
         # SONAR - Ping360
         # ==============================================================
