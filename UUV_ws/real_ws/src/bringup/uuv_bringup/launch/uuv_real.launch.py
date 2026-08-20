@@ -27,7 +27,7 @@ def generate_launch_description():
     ping360_angle_step = LaunchConfiguration('ping360_angle_step')
 
     mavlink_url = LaunchConfiguration('mavlink_url')
-    
+
     command_output = LaunchConfiguration('command_output')
     command_scale = LaunchConfiguration('command_scale')
 
@@ -139,14 +139,14 @@ def generate_launch_description():
             default_value='0.20',
             description='Maximum MANUAL_CONTROL command scale'
         ),
-        
+
         DeclareLaunchArgument(
             'arm_control',
             default_value='false',
             description='Enable Xbox ARM/DISARM commands through MAVLink'
-        ),        
-        
-                
+        ),
+
+
         # ==============================================================
         # MAVLINK TELEMETRY
         #
@@ -171,14 +171,17 @@ def generate_launch_description():
                 'target_system_id': 1,
                 'target_component_id': 1,
                 'heartbeat_timeout': 3.0,
-                'motor_power_on_threshold': 10.0,
-                'motor_power_off_threshold': 5.0,
+                'motor_power_on_threshold': 11.0,
+                'motor_power_off_threshold': 8.0,
+                'sys_status_rate_hz': 20.0,
+
+
                 'enable_command_output': command_output,
                 'command_scale': command_scale,
                 'enable_arm_disarm': arm_control,
             }],
         ),
-                
+
         # ==============================================================
         # XBOX TELEOPERATION
         #
@@ -204,7 +207,7 @@ def generate_launch_description():
             output='screen',
             condition=IfCondition(xbox),
         ),
-        
+
         Node(
             package='uuv_teleop',
             executable='audio_feedback_node',
@@ -216,8 +219,8 @@ def generate_launch_description():
                 'volume': 0.35,
             }],
         ),
-        
-                
+
+
         # ==============================================================
         # SONAR - Ping360
         # ==============================================================

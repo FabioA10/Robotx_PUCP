@@ -9,6 +9,7 @@ from std_msgs.msg import Bool
 from std_msgs.msg import Empty
 from std_msgs.msg import Float32
 from std_msgs.msg import String
+from std_msgs.msg import UInt8MultiArray
 
 from pymavlink import mavutil
 
@@ -26,7 +27,18 @@ class MavlinkBridgeNode(Node):
             'enable_arm_disarm',
             False
         )
-        
+
+        self.declare_parameter(
+            'sys_status_rate_hz',
+            20.0
+        )
+
+        self.sys_status_rate_hz = (
+            self.get_parameter('sys_status_rate_hz')
+            .get_parameter_value()
+            .double_value
+        )
+
         self.enable_arm_disarm = (
             self.get_parameter('enable_arm_disarm')
             .get_parameter_value()
@@ -87,7 +99,7 @@ class MavlinkBridgeNode(Node):
             .get_parameter_value()
             .integer_value
         )
-        
+
         self.udp_port = (
             self.get_parameter('udp_port')
             .get_parameter_value()
@@ -156,7 +168,7 @@ class MavlinkBridgeNode(Node):
         # =========================================================
         # State
         # =========================================================
-        
+
         self.last_armed_state = None
 
         self.last_heartbeat_time = None
@@ -174,6 +186,8 @@ class MavlinkBridgeNode(Node):
         self.last_connected_state = None
         self.last_motor_power_state = None
         self.last_motion_allowed = None
+
+
 
         # =========================================================
         # Publishers
@@ -230,7 +244,14 @@ class MavlinkBridgeNode(Node):
         # =========================================================
         # Subscribers
         # =========================================================
-        
+
+        self.create_subscription(
+            UInt8MultiArray,
+            '/uuv/indicator/rgb',
+            self.rgb_indicator_callback,
+            10
+        )
+
         self.create_subscription(
             Empty,
             '/uuv/control/arm_request',
@@ -308,7 +329,7 @@ class MavlinkBridgeNode(Node):
             f'SYSID={self.target_system_id}, '
             f'COMPID={self.target_component_id}'
         )
-        
+
         self.get_logger().info(
             f'MAVLink source SYSID: {self.source_system_id}'
         )
@@ -435,6 +456,40 @@ class MavlinkBridgeNode(Node):
             0.0,
             0.0
         )
+
+    def request_sys_status_rate(self):
+
+        if self.sys_status_rate_hz <= 0.0:
+            return
+
+        interval_us = int(
+            1_000_000
+            / self.sys_status_rate_hz
+        )
+
+        self.master.mav.command_long_send(
+            self.target_system_id,
+            self.target_component_id,
+
+            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+
+            0,
+
+            mavutil.mavlink.MAVLINK_MSG_ID_SYS_STATUS,
+            interval_us,
+
+            0,
+            0,
+            0,
+            0,
+            0
+        )
+
+        self.get_logger().info(
+            f'Requested SYS_STATUS at '
+            f'{self.sys_status_rate_hz:.1f} Hz'
+        )
+
     # =============================================================
     # ROS callbacks
     # =============================================================
@@ -447,6 +502,32 @@ class MavlinkBridgeNode(Node):
     def deadman_callback(self, msg):
 
         self.deadman = msg.data
+
+    def rgb_indicator_callback(self, msg):
+
+        if len(msg.data) != 3:
+
+            self.get_logger().warning(
+                'RGB command rejected: expected [R, G, B]'
+            )
+            return
+
+        if not self.connected:
+
+            self.get_logger().warning(
+                'RGB command rejected: MAVLink disconnected'
+            )
+            return
+
+        r = int(msg.data[0])
+        g = int(msg.data[1])
+        b = int(msg.data[2])
+
+        self.send_rgb_indicator(
+            r,
+            g,
+            b
+        )
 
     # =============================================================
     # MAVLink receiver
@@ -482,6 +563,38 @@ class MavlinkBridgeNode(Node):
 
                 self.process_sys_status(msg)
 
+    def send_rgb_indicator(self, r, g, b):
+
+        custom_bytes = [
+            r,
+            g,
+            b,
+        ] + [0] * 21
+
+        try:
+
+            self.master.mav.led_control_send(
+                self.target_system_id,
+                self.target_component_id,
+
+                255,   # all LED instances
+                255,   # LED_CONTROL_PATTERN_CUSTOM
+
+                3,     # custom length = RGB
+
+                custom_bytes
+            )
+
+            self.get_logger().info(
+                f'RGB indicator: '
+                f'R={r} G={g} B={b}'
+            )
+
+        except Exception as exc:
+
+            self.get_logger().error(
+                f'Failed to send RGB indicator command: {exc}'
+            )
     # =============================================================
     # HEARTBEAT
     # =============================================================
@@ -494,7 +607,7 @@ class MavlinkBridgeNode(Node):
             msg.base_mode
             & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
         )
-        
+
         if self.armed != self.last_armed_state:
 
             if self.armed:
@@ -520,13 +633,13 @@ class MavlinkBridgeNode(Node):
                 self.get_logger().info(
                     '      BLUE ROV2 DISARMED'
                 )
-        
+
                 self.get_logger().info(
                     '================================'
                 )
 
             self.last_armed_state = self.armed
-    
+
 
         self.mode = mavutil.mode_string_v10(msg)
 
@@ -570,6 +683,8 @@ class MavlinkBridgeNode(Node):
 
             # Motor power hysteresis
 
+
+
             if (
                 voltage_value
                 >= self.motor_power_on_threshold
@@ -583,6 +698,9 @@ class MavlinkBridgeNode(Node):
             ):
 
                 self.motors_enabled = False
+
+
+
 
             motors_msg = Bool()
             motors_msg.data = (
@@ -667,7 +785,10 @@ class MavlinkBridgeNode(Node):
 
                 self.get_logger().info(
                     'BlueROV2 autopilot CONNECTED'
+
                 )
+
+                self.request_sys_status_rate()
 
             else:
 
