@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 
@@ -278,6 +278,14 @@ def generate_launch_description():
 
         # ==============================================================
         # CAMERA
+        #
+        # BlueROV2 H264 stream
+        #       ↓
+        # bluerov2_camera
+        #       ↓
+        # /camera/image/compressed
+        #       ↓
+        # rqt_image_view
         # ==============================================================
 
         Node(
@@ -286,6 +294,30 @@ def generate_launch_description():
             name='bluerov2_video',
             output='screen',
             condition=IfCondition(camera),
+        ),
+
+        # --------------------------------------------------------------
+        # Camera viewer
+        #
+        # Wait a few seconds so the camera publisher has time to start.
+        # The image topic is passed directly to rqt_image_view so the
+        # operator does not have to select it manually.
+        # --------------------------------------------------------------
+
+        TimerAction(
+            period=2.0,
+
+            actions=[
+
+                Node(
+                    package='rqt_image_view',
+                    executable='rqt_image_view',
+                    name='uuv_camera_view',
+                    output='screen',
+                    condition=IfCondition(camera),
+                ),
+
+            ],
         ),
 
         # ==============================================================

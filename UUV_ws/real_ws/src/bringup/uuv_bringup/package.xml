@@ -28,6 +28,12 @@
   <exec_depend>uuv_mavlink</exec_depend>
   <exec_depend>uuv_teleop</exec_depend>
   <exec_depend>joy</exec_depend>
+  <exec_depend>bluerov2_camera</exec_depend>
+  <exec_depend>camera_control</exec_depend>
+  <exec_depend>uuv_mavlink</exec_depend>
+  <exec_depend>uuv_teleop</exec_depend>
+  <exec_depend>joy</exec_depend>
+  <exec_depend>rqt_image_view</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

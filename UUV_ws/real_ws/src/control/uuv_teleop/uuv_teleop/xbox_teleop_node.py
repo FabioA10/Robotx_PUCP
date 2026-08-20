@@ -5,7 +5,7 @@ from rclpy.node import Node
 
 from sensor_msgs.msg import Joy
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool, Empty
+from std_msgs.msg import Bool, Empty, Int8
 
 
 class XboxTeleopNode(Node):
@@ -91,10 +91,22 @@ class XboxTeleopNode(Node):
         # State
         # =========================================================
 
+
+        # =========================================================
+        # ArduSub operational mode sequence
+        #
+        # MOTOR_DETECT intentionally excluded because it is
+        # a motor configuration/detection routine.
+        # =========================================================
+
+
         self.arm_hold_start = None
         self.arm_request_sent = False
 
         self.previous_b_pressed = False
+
+        self.previous_dpad_up_pressed = False
+        self.previous_dpad_down_pressed = False
 
         # =========================================================
         # Publishers
@@ -103,6 +115,12 @@ class XboxTeleopNode(Node):
         self.publisher = self.create_publisher(
             Twist,
             '/uuv/cmd_vel_manual',
+            10
+        )
+
+        self.mode_step_pub = self.create_publisher(
+            Int8,
+            '/uuv/control/mode_step',
             10
         )
 
@@ -135,6 +153,8 @@ class XboxTeleopNode(Node):
             10
         )
 
+
+
         # =========================================================
         # Startup information
         # =========================================================
@@ -155,7 +175,14 @@ class XboxTeleopNode(Node):
             'Hold RB to enable motion commands.'
         )
 
-    # =============================================================
+        self.get_logger().info(
+            'LB + D-pad UP/DOWN -> change vehicle mode.'
+        )
+
+
+
+
+    # =============================================================     -------------------------------------------------------------------
     # Helpers
     # =============================================================
 
@@ -209,7 +236,7 @@ class XboxTeleopNode(Node):
 
             return
 
-        if len(msg.buttons) <= self.BUTTON_RB:
+        if len(msg.buttons) <= self.BUTTON_DPAD_DOWN:
 
             self.get_logger().warning(
                 'Joystick message does not contain expected buttons.'
@@ -240,6 +267,18 @@ class XboxTeleopNode(Node):
 
         x_pressed = (
             msg.buttons[self.BUTTON_X] == 1
+        )
+
+        lb_pressed = (
+            msg.buttons[self.BUTTON_LB] == 1
+        )
+
+        dpad_up_pressed = (
+            msg.buttons[self.BUTTON_DPAD_UP] == 1
+        )
+
+        dpad_down_pressed = (
+            msg.buttons[self.BUTTON_DPAD_DOWN] == 1
         )
 
         # =========================================================
@@ -284,6 +323,81 @@ class XboxTeleopNode(Node):
         controls_neutral = (
             self.controls_are_neutral(msg)
         )
+
+
+        # =========================================================
+        # MODE SELECTION
+        #
+        # LB + D-pad UP   -> next mode
+        # LB + D-pad DOWN -> previous mode
+        #
+        # Mode changes are accepted only with:
+        #   - RB released
+        #   - analog controls neutral
+        #   - B not pressed
+        # =========================================================
+
+        mode_change_allowed = (
+            lb_pressed
+            and not rb_pressed
+            and not b_pressed
+            and controls_neutral
+        )
+
+
+        if mode_change_allowed:
+
+            # -----------------------------------------------------
+            # NEXT MODE
+            # -----------------------------------------------------
+
+            if (
+                dpad_up_pressed
+                and not self.previous_dpad_up_pressed
+            ):
+
+                step_msg = Int8()
+                step_msg.data = 1
+
+                self.mode_step_pub.publish(
+                    step_msg
+                )
+
+                self.get_logger().warning(
+                    'NEXT mode requested from Xbox'
+                )
+
+
+            # -----------------------------------------------------
+            # PREVIOUS MODE
+            # -----------------------------------------------------
+
+            if (
+                dpad_down_pressed
+                and not self.previous_dpad_down_pressed
+            ):
+
+                step_msg = Int8()
+                step_msg.data = -1
+
+                self.mode_step_pub.publish(
+                    step_msg
+                )
+
+                self.get_logger().warning(
+                    'PREVIOUS mode requested from Xbox'
+                )
+
+
+        self.previous_dpad_up_pressed = (
+            dpad_up_pressed
+        )
+
+        self.previous_dpad_down_pressed = (
+            dpad_down_pressed
+        )
+
+
 
         arm_conditions = (
             x_pressed

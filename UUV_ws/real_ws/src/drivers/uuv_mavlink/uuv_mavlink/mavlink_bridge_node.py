@@ -10,6 +10,7 @@ from std_msgs.msg import Empty
 from std_msgs.msg import Float32
 from std_msgs.msg import String
 from std_msgs.msg import UInt8MultiArray
+from std_msgs.msg import Int8
 
 from pymavlink import mavutil
 
@@ -22,6 +23,42 @@ class MavlinkBridgeNode(Node):
         # =========================================================
         # Parameters
         # =========================================================
+
+        self.mode_name_by_id = {
+            0: 'STABILIZE',
+            1: 'ACRO',
+            2: 'ALT_HOLD',
+            3: 'AUTO',
+            4: 'GUIDED',
+            7: 'CIRCLE',
+            9: 'SURFACE',
+            16: 'POSHOLD',
+            19: 'MANUAL',
+            20: 'MOTOR_DETECT',
+            21: 'SURFTRAK',
+        }
+
+        # =========================================================
+        # Modes available from Xbox selector
+        #
+        # LB + D-pad UP   -> next mode
+        # LB + D-pad DOWN -> previous mode
+        #
+        # MOTOR_DETECT is intentionally excluded.
+        # =========================================================
+
+        self.mode_sequence = [
+            ('MANUAL', 19),
+            ('STABILIZE', 0),
+            ('ACRO', 1),
+            ('ALT_HOLD', 2),
+            ('POSHOLD', 16),
+            ('SURFTRAK', 21),
+            ('GUIDED', 4),
+            ('AUTO', 3),
+            ('CIRCLE', 7),
+            ('SURFACE', 9),
+        ]
 
         self.declare_parameter(
             'enable_arm_disarm',
@@ -246,6 +283,13 @@ class MavlinkBridgeNode(Node):
         # =========================================================
 
         self.create_subscription(
+            Int8,
+            '/uuv/control/mode_step',
+            self.mode_step_callback,
+            10
+        )
+
+        self.create_subscription(
             UInt8MultiArray,
             '/uuv/indicator/rgb',
             self.rgb_indicator_callback,
@@ -365,6 +409,125 @@ class MavlinkBridgeNode(Node):
             self.get_logger().info(
                 'Telemetry remains READ-ONLY.'
             )
+
+
+    def mode_step_callback(self, msg):
+
+        # ---------------------------------------------------------
+        # Safety checks
+        # ---------------------------------------------------------
+
+        if not self.enable_command_output:
+            self.get_logger().warning(
+                'MODE change rejected: command output disabled'
+            )
+            return
+
+        if not self.connected:
+            self.get_logger().warning(
+                'MODE change rejected: MAVLink disconnected'
+            )
+            return
+
+        if not self.motors_enabled:
+            self.get_logger().warning(
+                'MODE change rejected: propulsion power disabled'
+            )
+            return
+
+        if self.deadman:
+            self.get_logger().warning(
+                'MODE change rejected: release RB first'
+            )
+            return
+
+
+        # ---------------------------------------------------------
+        # Direction
+        #
+        # +1 = next mode
+        # -1 = previous mode
+        # ---------------------------------------------------------
+
+        step = int(msg.data)
+
+        if step not in (-1, 1):
+            return
+
+
+        # ---------------------------------------------------------
+        # Current mode
+        # ---------------------------------------------------------
+
+        mode_names = [
+            mode_name
+            for mode_name, _ in self.mode_sequence
+        ]
+
+        if self.mode not in mode_names:
+
+            self.get_logger().warning(
+                f'Current mode {self.mode} '
+                f'is not in mode selector'
+            )
+            return
+
+
+        current_index = mode_names.index(
+            self.mode
+        )
+
+        new_index = current_index + step
+
+
+        # ---------------------------------------------------------
+        # Do not wrap around
+        # ---------------------------------------------------------
+
+        if new_index < 0:
+
+            self.get_logger().info(
+                f'Already at first mode: {self.mode}'
+            )
+            return
+
+        if new_index >= len(self.mode_sequence):
+
+            self.get_logger().info(
+                f'Already at last mode: {self.mode}'
+            )
+            return
+
+
+        requested_mode, custom_mode = (
+            self.mode_sequence[new_index]
+        )
+
+
+        # ---------------------------------------------------------
+        # Send mode change to ArduSub
+        # ---------------------------------------------------------
+
+        self.get_logger().warning(
+            f'MODE request: '
+            f'{self.mode} -> {requested_mode}'
+        )
+
+        try:
+
+            self.master.mav.set_mode_send(
+                self.target_system_id,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                custom_mode
+            )
+
+        except Exception as exc:
+
+            self.get_logger().error(
+                f'Failed to send mode change: {exc}'
+            )
+
+
 
     def arm_request_callback(self, msg):
 
@@ -641,7 +804,17 @@ class MavlinkBridgeNode(Node):
             self.last_armed_state = self.armed
 
 
-        self.mode = mavutil.mode_string_v10(msg)
+        # =========================================================
+        # Resolve ArduSub mode from MAVLink custom_mode
+        # =========================================================
+
+        custom_mode = int(msg.custom_mode)
+
+        self.mode = self.mode_name_by_id.get(
+            custom_mode,
+            mavutil.mode_string_v10(msg)
+        )
+
 
         armed_msg = Bool()
         armed_msg.data = self.armed
@@ -654,7 +827,7 @@ class MavlinkBridgeNode(Node):
         mode_msg.data = self.mode
 
         self.mode_pub.publish(
-            mode_msg
+        mode_msg
         )
 
     # =============================================================
@@ -1005,16 +1178,28 @@ class MavlinkBridgeNode(Node):
 
     def send_shutdown_neutral(self):
 
+        # =========================================================
+        # Safe shutdown
+        #
+        # Do NOT use ROS logging here because the ROS context may
+        # already be shutting down after Ctrl+C.
+        # =========================================================
+
         if not self.enable_command_output:
             return
 
         if not self.connected:
             return
 
-        self.get_logger().warning(
-            'Sending neutral MANUAL_CONTROL '
-            'before shutdown.'
-        )
+        # Send several neutral MANUAL_CONTROL packets.
+        #
+        # x = 0
+        # y = 0
+        # z = 500  -> neutral
+        # r = 0
+        #
+        # Total duration:
+        # 5 * 20 ms = ~100 ms
 
         for _ in range(5):
 
@@ -1032,7 +1217,6 @@ class MavlinkBridgeNode(Node):
                 time.sleep(0.02)
 
             except Exception:
-
                 break
 
 
@@ -1052,13 +1236,44 @@ def main(args=None):
 
     finally:
 
+        # -----------------------------------------------------
+        # FIRST:
+        # Stop any possible vehicle command.
+        # -----------------------------------------------------
+
         node.send_shutdown_neutral()
 
-        node.destroy_node()
+        # -----------------------------------------------------
+        # SECOND:
+        # Close MAVLink socket.
+        # -----------------------------------------------------
+
+        try:
+            node.master.close()
+        except Exception:
+            pass
+
+        # -----------------------------------------------------
+        # THIRD:
+        # Destroy ROS node.
+        # -----------------------------------------------------
+
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+
+        # -----------------------------------------------------
+        # LAST:
+        # Shutdown ROS only if still active.
+        # -----------------------------------------------------
 
         if rclpy.ok():
 
-            rclpy.shutdown()
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
 
 
 if __name__ == '__main__':
