@@ -28,7 +28,7 @@ The project integrates the software required for the team's surface, underwater 
 - Simulation
 - Hardware testing
 
-The repository is organized by robotic platform and software functionality in order to keep the system modular, maintainable and scalable as new sensors, actuators and RobotX missions are incorporated.
+The repository is organized by robotic platform and software functionality in order to keep the system modular, maintainable and scalable as new sensors, actuators and RobotX missions are incorporated. Shared subsystems that coordinate more than one vehicle are placed in `SYSTEM_ws` instead of being owned by a single vehicle workspace.
 
 ---
 
@@ -71,13 +71,10 @@ Robotx_PUCP/
 │   │   └── commands/
 │   │       ├── real/
 │   │       └── simulation/
-│   │
 │   ├── hardware_tests/
 │   │   ├── camera/
 │   │   ├── dvl/
-│   │   ├── ping360/
-│   │   └── usbl/
-│   │
+│   │   └── ping360/
 │   ├── real_ws/
 │   │   └── src/
 │   │       ├── bringup/
@@ -89,19 +86,38 @@ Robotx_PUCP/
 │   │       ├── drivers/
 │   │       │   ├── bluerov2_camera/
 │   │       │   ├── ping360_ros2/
-│   │       │   ├── seatrac_ros2/
 │   │       │   └── uuv_mavlink/
 │   │       ├── experimental/
 │   │       ├── perception/
 │   │       ├── tasks/
 │   │       └── third_party/
-│   │
 │   └── simulation_ws/
 │       └── src/
 │           ├── control/
 │           ├── sensors/
 │           ├── simulator/
 │           └── tasks/
+│
+├── SYSTEM_ws/
+│   ├── docs/
+│   │   └── commands/
+│   │       └── COMANDOS_USBL
+│   ├── hardware_tests/
+│   │   └── usbl/
+│   │       ├── test_system_info_udp.py
+│   │       └── test_status_udp.py
+│   └── src/
+│       └── usbl/
+│           └── seatrac_ros2/
+│               ├── config/
+│               │   ├── freshwater.yaml
+│               │   └── seawater.yaml
+│               ├── launch/
+│               │   └── usbl.launch.py
+│               └── seatrac_ros2/
+│                   ├── seatrac_serial_node.py
+│                   ├── seatrac_status_node.py
+│                   └── seatrac_udp_node.py
 │
 ├── UAV_ws/
 │   ├── hardware_tests/
@@ -159,6 +175,120 @@ Contains standalone tests used to validate individual physical components before
 
 ---
 
+# SYSTEM — Shared RobotX Services
+
+`SYSTEM_ws` contains ROS 2 components that are shared between vehicles or provide system-level coordination. These components are intentionally kept outside `USV_ws`, `UUV_ws` and `UAV_ws` when they are not owned by a single platform.
+
+The first subsystem migrated to this workspace is the **SeaTrac USBL** interface.
+
+## SeaTrac USBL Architecture
+
+Current physical and network architecture:
+
+```text
+Laptop / ROS 2
+192.168.2.1
+      │
+      │ UDP :15000
+      ▼
+BlueBoat BlueOS
+192.168.2.3
+      │
+      │ Serial Bridge
+      ▼
+/dev/ttyUSB0 @ 115200
+      │
+      │ RS232
+      ▼
+SeaTrac X150
+      │
+      │ acoustic link — enabled only for in-water tests
+      ▼
+SeaTrac X110 on the UUV
+```
+
+The X150 is physically connected to the BlueBoat. BlueOS acts only as a serial-to-UDP bridge; the SeaTrac protocol and ROS 2 logic run on the operator laptop in `SYSTEM_ws`.
+
+This organization allows the same USBL measurement to later support both intended coordination modes:
+
+- UUV follows USV
+- USV follows UUV
+
+The SeaTrac driver publishes measurements and diagnostics. Higher-level vehicle-following behavior will be implemented separately so the USBL driver itself does not command either vehicle.
+
+## Current SeaTrac Functionality
+
+The current implementation has been validated with the physical X150 through BlueOS UDP.
+
+```text
+BlueOS address             192.168.2.3
+BlueOS Serial Bridge port  15000 / UDP server
+SeaTrac serial interface   /dev/ttyUSB0 @ 115200
+ROS 2 transport            UDP
+STATUS rate                1 Hz
+```
+
+Validated functions:
+
+- `SYSTEM_INFO` request and `$02` response
+- Periodic `STATUS` request and `$10` response
+- CRC validation and status decoding
+- Voltage, temperature, pressure, depth and sound-speed decoding
+- AHRS orientation and magnetometer-calibration status
+- Magnetometer calibration services preserved from the original driver
+- Environment read/apply services
+- Fresh-water and sea-water ROS 2 profiles
+- Guarded persistent-settings save
+
+Primary topics:
+
+```text
+/seatrac/system_info_raw
+/seatrac/status_raw
+/seatrac/status
+```
+
+Primary services:
+
+```text
+/seatrac/environment/read
+/seatrac/environment/apply
+/seatrac/settings/save
+/seatrac/calibration/reset_magnetometer
+/seatrac/calibration/calculate_magnetometer
+```
+
+### Environment profiles
+
+Two profiles are currently provided:
+
+| Profile | Salinity | AUTO_VOS | AUTO_PRESSURE_OFS |
+|---|---:|:---:|:---:|
+| `freshwater` | `0.0 ppt` | `true` | `true` |
+| `seawater` | `35.0 ppt` | `true` | `true` |
+
+Loading a profile changes ROS 2 parameters only. It does **not** automatically modify the SeaTrac configuration.
+
+`/seatrac/environment/apply` explicitly applies the selected environmental settings to the X150 working configuration. Current testing confirmed that a temporary change from `0.0 ppt` to `35.0 ppt` returned to `0.0 ppt` after a physical X150 power cycle when no persistent save was performed.
+
+Persistent writes are blocked by default:
+
+```text
+allow_persistent_save = false
+```
+
+Therefore `/seatrac/settings/save` returns a failure without sending the persistent-save command unless persistent saving is deliberately enabled. Normal operation is designed to avoid unnecessary non-volatile-memory writes.
+
+Acoustic positioning is also disabled by default:
+
+```text
+acoustic_positioning_enabled = false
+```
+
+The X150 ↔ X110 ranging/USBL-positioning layer is pending in-water validation and must not be assumed to be implemented or validated yet.
+
+---
+
 # UUV — BlueROV2 Heavy
 
 The Unmanned Underwater Vehicle is based on the **Blue Robotics BlueROV2 Heavy**.
@@ -192,7 +322,6 @@ UUV_ws/real_ws/src/
 ├── drivers/
 │   ├── bluerov2_camera/
 │   ├── ping360_ros2/
-│   ├── seatrac_ros2/
 │   └── uuv_mavlink/
 ├── experimental/
 ├── perception/
@@ -215,9 +344,8 @@ Current real-hardware bringup includes support for:
 
 - Ping360 imaging sonar
 - Ping360 point-cloud filtering
-- SeaTrac USBL
-- SeaTrac status processing
 - BlueROV2 video stream
+- Automatic `rqt_image_view` camera viewer
 - Camera tilt control
 - MAVLink telemetry
 - Xbox teleoperation
@@ -236,7 +364,6 @@ Individual subsystems can be enabled or disabled using ROS 2 launch arguments.
 drivers/
 ├── bluerov2_camera/
 ├── ping360_ros2/
-├── seatrac_ros2/
 └── uuv_mavlink/
 ```
 
@@ -249,18 +376,6 @@ Receives and publishes the BlueROV2 video stream.
 ROS 2 interface for the **Blue Robotics Ping360 Imaging Sonar**.
 
 The sonar measurements are converted into ROS 2 point-cloud data for visualization and higher-level processing.
-
-### `seatrac_ros2`
-
-ROS 2 interface for the **SeaTrac USBL** system.
-
-Current functionality includes:
-
-- Serial communication
-- Status decoding
-- Magnetometer calibration
-- Environment configuration
-- Persistent device settings
 
 ### `uuv_mavlink`
 
@@ -303,9 +418,9 @@ The propulsion-power state is inferred from the measured propulsion bus voltage.
 Current hysteresis thresholds:
 
 ```text
-Voltage >= 10 V   -> propulsion power enabled
-Voltage <= 5 V    -> propulsion power disabled
-5 V ... 10 V      -> preserve previous state
+Voltage >= 11 V   -> propulsion power enabled
+Voltage <= 8 V    -> propulsion power disabled
+8 V ... 11 V      -> preserve previous state
 ```
 
 The bridge transmits `MANUAL_CONTROL` at 20 Hz when command output is explicitly enabled.
@@ -363,6 +478,8 @@ Current controller mapping:
 | **RB (hold)** | Motion deadman |
 | **X + RB (hold 1.5 s)** | ARM request |
 | **B** | Immediate DISARM request |
+| **LB + D-pad Up** | Select next supported ArduSub mode |
+| **LB + D-pad Down** | Select previous supported ArduSub mode |
 | Left stick vertical | Forward / backward |
 | Left stick horizontal | Left / right |
 | Right stick horizontal | Yaw |
@@ -378,10 +495,11 @@ xbox_teleop_node
         ├── /uuv/cmd_vel_manual
         ├── /uuv/deadman
         ├── /uuv/control/arm_request
-        └── /uuv/control/disarm_request
+        ├── /uuv/control/disarm_request
+        └── /uuv/control/mode_step
 ```
 
-When RB is released, `/uuv/cmd_vel_manual` returns to a neutral command.
+When RB is released, `/uuv/cmd_vel_manual` returns to a neutral command. Mode stepping is edge-triggered and is accepted only while the motion deadman is released and the manual controls are neutral.
 
 If joystick messages stop arriving, the command watchdog in the MAVLink bridge prevents stale motion commands from remaining active.
 
@@ -554,8 +672,7 @@ Standalone hardware validation is organized under:
 UUV_ws/hardware_tests/
 ├── camera/
 ├── dvl/
-├── ping360/
-└── usbl/
+└── ping360/
 ```
 
 These directories are intended for individual component tests before complete vehicle integration.
@@ -572,7 +689,11 @@ UUV_ws/docs/commands/
 └── simulation/
 ```
 
-The original files are intentionally preserved for development traceability.
+The original files are intentionally preserved for development traceability. USBL-specific operating notes were moved out of the UUV tree to:
+
+```text
+SYSTEM_ws/docs/commands/COMANDOS_USBL
+```
 
 Clean startup documentation and ROS 2 launch files are progressively replacing the need to manually execute multiple commands.
 
@@ -602,7 +723,7 @@ The UAV hardware and software architecture will be incorporated once the final a
 | Operating System | Ubuntu |
 | Languages | Python, C++ |
 | Autopilot | ArduPilot / ArduSub |
-| Communication | MAVLink / pymavlink / MAVROS |
+| Communication | MAVLink / UDP / BlueOS Serial Bridge / pymavlink / MAVROS |
 | Simulation | Gazebo |
 | Computer Vision | OpenCV |
 | Build System | colcon |
@@ -616,6 +737,20 @@ The UAV hardware and software architecture will be incorporated once the final a
 
 ```bash
 cd ~/ROS2/ROBOT_X_IMPLEMENTATION/Robotx_PUCP/USV_ws
+
+source /opt/ros/humble/setup.bash
+
+colcon build --symlink-install
+
+source install/setup.bash
+```
+
+---
+
+## SYSTEM — Shared Services
+
+```bash
+cd ~/ROS2/ROBOT_X_IMPLEMENTATION/Robotx_PUCP/SYSTEM_ws
 
 source /opt/ros/humble/setup.bash
 
@@ -653,11 +788,76 @@ source install/setup.bash
 ```
 
 > Do not run `colcon build` from `Robotx_PUCP/`.  
-> Build each vehicle workspace independently.
+> Build `USV_ws`, `SYSTEM_ws`, `UUV_ws/real_ws` and `UUV_ws/simulation_ws` independently as required.
 
 ---
 
 # Running the Main Systems
+
+## SYSTEM — SeaTrac USBL Bringup
+
+After building `SYSTEM_ws`:
+
+```bash
+cd ~/ROS2/ROBOT_X_IMPLEMENTATION/Robotx_PUCP/SYSTEM_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+```
+
+Fresh-water profile:
+
+```bash
+ros2 launch seatrac_ros2 usbl.launch.py environment:=freshwater
+```
+
+Sea-water profile:
+
+```bash
+ros2 launch seatrac_ros2 usbl.launch.py environment:=seawater
+```
+
+The launch starts:
+
+```text
+seatrac_udp_node
+seatrac_status_node
+```
+
+The profile can be inspected without changing the X150:
+
+```bash
+ros2 param get /seatrac_udp_node salinity_ppt
+ros2 param get /seatrac_udp_node auto_vos
+ros2 param get /seatrac_udp_node auto_pressure_offset
+ros2 param get /seatrac_udp_node acoustic_positioning_enabled
+ros2 param get /seatrac_udp_node allow_persistent_save
+```
+
+Read the environmental configuration currently active in the X150:
+
+```bash
+ros2 service call \
+  /seatrac/environment/read \
+  std_srvs/srv/Trigger "{}"
+```
+
+Apply the selected profile to the X150 working configuration for the current session:
+
+```bash
+ros2 service call \
+  /seatrac/environment/apply \
+  std_srvs/srv/Trigger "{}"
+```
+
+> **SeaTrac safety notes**
+>
+> - Loading `freshwater` or `seawater` changes ROS 2 parameters only.
+> - `environment/apply` is explicit and is intended for the current working session.
+> - Persistent save is blocked by default with `allow_persistent_save=false`.
+> - Do not enable acoustic positioning for out-of-water development.
+> - X150 ↔ X110 ranging and relative positioning are pending in-water validation.
+
+---
 
 ## UUV — Real Hardware Bringup
 
@@ -684,7 +884,6 @@ Current default behavior:
 ```text
 Ping360 acquisition          ON
 Ping360 filtering            ON
-SeaTrac USBL                 ON
 BlueROV2 camera              ON
 MAVLink telemetry            ON
 
@@ -711,7 +910,6 @@ Main options include:
 
 ```text
 sonar
-usbl
 camera
 control
 camera_tilt
@@ -722,7 +920,6 @@ command_output
 command_scale
 arm_control
 
-usbl_port
 ping360_host
 ping360_port
 ping360_range
@@ -740,7 +937,6 @@ ros2 launch uuv_bringup uuv_real.launch.py \
   command_output:=false \
   arm_control:=false \
   sonar:=false \
-  usbl:=false \
   camera:=false \
   control:=false \
   camera_tilt:=false
@@ -755,7 +951,6 @@ ros2 launch uuv_bringup uuv_real.launch.py \
   command_output:=false \
   arm_control:=false \
   sonar:=false \
-  usbl:=false \
   camera:=false \
   control:=false \
   camera_tilt:=false
@@ -771,7 +966,6 @@ ros2 launch uuv_bringup uuv_real.launch.py \
   arm_control:=true \
   command_scale:=0.30 \
   sonar:=false \
-  usbl:=false \
   camera:=false \
   control:=false \
   camera_tilt:=false
@@ -795,20 +989,6 @@ ros2 launch uuv_bringup uuv_real.launch.py \
   telemetry:=false \
   xbox:=false \
   sonar:=true \
-  usbl:=false \
-  camera:=false \
-  control:=false \
-  camera_tilt:=false
-```
-
-### SeaTrac USBL only
-
-```bash
-ros2 launch uuv_bringup uuv_real.launch.py \
-  telemetry:=false \
-  xbox:=false \
-  sonar:=false \
-  usbl:=true \
   camera:=false \
   control:=false \
   camera_tilt:=false
@@ -821,7 +1001,6 @@ ros2 launch uuv_bringup uuv_real.launch.py \
   telemetry:=false \
   xbox:=false \
   sonar:=false \
-  usbl:=false \
   camera:=true \
   control:=false \
   camera_tilt:=false
@@ -912,22 +1091,6 @@ ros2 run ping360_filter ping360_filter_node --ros-args \
   -p input_topic:=/ping360/points \
   -p output_topic:=/ping360/filtered_points \
   -p first_return_only:=false
-```
-
-## SeaTrac USBL
-
-Serial communication:
-
-```bash
-ros2 run seatrac_ros2 seatrac_serial_node \
-  --ros-args \
-  -p port:=/dev/ttyUSB0
-```
-
-Status decoder:
-
-```bash
-ros2 run seatrac_ros2 seatrac_status_node
 ```
 
 ## BlueROV2 Camera
@@ -1162,6 +1325,11 @@ The target architecture is:
 ```text
 RobotX
 │
+├── SYSTEM Services
+│   ├── Shared sensing
+│   ├── USBL / relative localization
+│   └── Multi-vehicle coordination
+│
 ├── USV Bringup
 │   ├── Hardware
 │   ├── Perception
@@ -1189,6 +1357,7 @@ One command
      ▼
 RobotX Bringup
      │
+     ├── SYSTEM
      ├── USV
      ├── UUV
      └── UAV
@@ -1209,7 +1378,8 @@ The current repository structure is designed to support future development inclu
 - Common RobotX interfaces
 - Autonomous mission execution
 - Real/simulation interchangeability
-- Multi-vehicle coordination
+- SeaTrac X150 ↔ X110 acoustic ranging and relative positioning
+- Multi-vehicle coordination using shared USBL localization
 - Complete RobotX system bringup
 
 ---
@@ -1227,6 +1397,19 @@ The current repository structure is designed to support future development inclu
 | Bringup | 🟡 | 🟢 | ⚪ |
 | Autonomous missions | 🟡 | 🟡 | ⚪ |
 | Multi-vehicle integration | ⚪ | ⚪ | ⚪ |
+
+Shared-system status:
+
+| Capability | Status |
+|---|:---:|
+| SeaTrac X150 BlueOS UDP transport | 🟢 |
+| SeaTrac SYSTEM_INFO / STATUS | 🟢 |
+| Freshwater / seawater profiles | 🟢 |
+| Temporary environment apply | 🟢 |
+| Persistent-save protection | 🟢 |
+| X150 ↔ X110 acoustic ranging | 🟡 In-water validation pending |
+| USBL relative positioning | 🟡 Development |
+| USV/UUV follow coordination | 🟡 Planned |
 
 ---
 
