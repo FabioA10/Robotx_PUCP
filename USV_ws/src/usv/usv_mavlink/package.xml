@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model
+  href="http://download.ros.org/schema/package_format3.xsd"
+  schematypens="http://www.w3.org/2001/XMLSchema"?>
+
+<package format="3">
+
+  <name>usv_mavlink</name>
+  <version>0.1.0</version>
+
+  <description>
+    ROS 2 MAVLink interface for the RobotX PUCP BlueBoat.
+  </description>
+
+  <maintainer email="a20216480@pucp.edu.pe">
+    RobotX PUCP
+  </maintainer>
+
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+
+</package>
