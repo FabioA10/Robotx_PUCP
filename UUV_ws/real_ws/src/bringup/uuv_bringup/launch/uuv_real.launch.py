@@ -13,12 +13,12 @@ def generate_launch_description():
     # ------------------------------------------------------------------
 
     sonar = LaunchConfiguration('sonar')
-    usbl = LaunchConfiguration('usbl')
+
     camera = LaunchConfiguration('camera')
     control = LaunchConfiguration('control')
     camera_tilt = LaunchConfiguration('camera_tilt')
 
-    usbl_port = LaunchConfiguration('usbl_port')
+
 
     ping360_host = LaunchConfiguration('ping360_host')
     ping360_port = LaunchConfiguration('ping360_port')
@@ -47,11 +47,7 @@ def generate_launch_description():
             description='Start Ping360 acquisition and filtering'
         ),
 
-        DeclareLaunchArgument(
-            'usbl',
-            default_value='true',
-            description='Start SeaTrac USBL nodes'
-        ),
+
 
         DeclareLaunchArgument(
             'camera',
@@ -75,11 +71,6 @@ def generate_launch_description():
         # Hardware configuration
         # ==============================================================
 
-        DeclareLaunchArgument(
-            'usbl_port',
-            default_value='/dev/ttyUSB0',
-            description='Serial port used by SeaTrac USBL'
-        ),
 
         DeclareLaunchArgument(
             'ping360_host',
@@ -253,28 +244,6 @@ def generate_launch_description():
             }],
         ),
 
-        # ==============================================================
-        # USBL - SeaTrac
-        # ==============================================================
-
-        Node(
-            package='seatrac_ros2',
-            executable='seatrac_serial_node',
-            name='seatrac_serial',
-            output='screen',
-            condition=IfCondition(usbl),
-            parameters=[{
-                'port': usbl_port,
-            }],
-        ),
-
-        Node(
-            package='seatrac_ros2',
-            executable='seatrac_status_node',
-            name='seatrac_status',
-            output='screen',
-            condition=IfCondition(usbl),
-        ),
 
         # ==============================================================
         # CAMERA

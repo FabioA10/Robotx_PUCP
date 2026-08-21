@@ -22,16 +22,13 @@
   <exec_depend>rov_control</exec_depend>
   <exec_depend>ping360_ros2</exec_depend>
   <exec_depend>ping360_filter</exec_depend>
-  <exec_depend>seatrac_ros2</exec_depend>
+
   <exec_depend>bluerov2_camera</exec_depend>
   <exec_depend>camera_control</exec_depend>
+
   <exec_depend>uuv_mavlink</exec_depend>
   <exec_depend>uuv_teleop</exec_depend>
-  <exec_depend>joy</exec_depend>
-  <exec_depend>bluerov2_camera</exec_depend>
-  <exec_depend>camera_control</exec_depend>
-  <exec_depend>uuv_mavlink</exec_depend>
-  <exec_depend>uuv_teleop</exec_depend>
+
   <exec_depend>joy</exec_depend>
   <exec_depend>rqt_image_view</exec_depend>
 
