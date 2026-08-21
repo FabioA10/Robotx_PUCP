@@ -1,4 +1,4 @@
-seatrac_serial_node:
+seatrac_udp_node:
   ros__parameters:
 
     # ------------------------------------------------------------
@@ -20,6 +20,7 @@ seatrac_serial_node:
     # Acquisition
     # ------------------------------------------------------------
     status_rate_hz: 1.0
+    allow_persistent_save: false
 
     # ------------------------------------------------------------
     # Acoustic positioning
