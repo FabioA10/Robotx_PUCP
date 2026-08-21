@@ -193,6 +193,12 @@ class SeaTracUdpNode(Node):
             self.save_settings_callback,
         )
 
+        self.environment_read_service = self.create_service(
+            Trigger,
+            "seatrac/environment/read",
+            self.read_environment_callback,
+        )
+
         self.environment_apply_service = self.create_service(
             Trigger,
             "seatrac/environment/apply",
@@ -497,6 +503,97 @@ class SeaTracUdpNode(Node):
     # ==================================================================
     # Environment
     # ==================================================================
+
+    def read_environment_callback(
+        self,
+        request,
+        response,
+    ):
+        """Lee la configuración ambiental actual sin modificarla."""
+        del request
+
+        try:
+            self.drain_udp_input()
+
+            get_command = build_seatrac_command(
+                bytes([0x15])
+            )
+
+            self.send_command(get_command)
+
+            settings_response = self.read_response(
+                expected_command_id=0x15,
+                timeout_seconds=self.response_timeout_s,
+            )
+
+            if settings_response is None:
+                response.success = False
+                response.message = (
+                    "No llegó una respuesta válida $15."
+                )
+                return response
+
+            settings = bytes(
+                settings_response[1:]
+            )
+
+            if len(settings) < 37:
+                response.success = False
+                response.message = (
+                    "El registro SETTINGS_T es demasiado corto: "
+                    f"{len(settings)} bytes."
+                )
+                return response
+
+            env_flags = settings[28]
+
+            auto_vos = bool(
+                env_flags & 0x01
+            )
+
+            auto_pressure_offset = bool(
+                env_flags & 0x02
+            )
+
+            salinity_raw = struct.unpack_from(
+                "<H",
+                settings,
+                33,
+            )[0]
+
+            salinity_ppt = (
+                salinity_raw / 10.0
+            )
+
+            response.success = True
+            response.message = (
+                "Configuración ambiental actual del X150: "
+                f"salinity_ppt={salinity_ppt:.1f}, "
+                f"AUTO_VOS={auto_vos}, "
+                "AUTO_PRESSURE_OFS="
+                f"{auto_pressure_offset}, "
+                f"ENV_FLAGS=0x{env_flags:02X}. "
+                "Solo lectura; no se modificó "
+                "RAM ni EEPROM."
+            )
+
+            self.get_logger().info(
+                response.message
+            )
+
+            return response
+
+        except OSError as error:
+            response.success = False
+            response.message = (
+                f"Error UDP: {error}"
+            )
+
+            self.get_logger().error(
+                response.message
+            )
+
+            return response
 
     def apply_environment_callback(
         self,
