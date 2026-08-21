@@ -63,6 +63,7 @@ Robotx_PUCP/
 │           ├── usv_bringup/
 │           ├── usv_control/
 │           ├── usv_hardware/
+│           ├── usv_mavlink/
 │           ├── usv_perception/
 │           └── usv_teleop/
 │
@@ -167,7 +168,56 @@ Contains perception and camera-related processing.
 
 ### `usv_teleop`
 
-Contains manual teleoperation tools used during development, debugging and testing.
+Contains manual teleoperation tools used during development, debugging and testing. The current package includes the existing keyboard teleoperation node. Xbox teleoperation for the BlueBoat will be added progressively using the same safety-first approach already validated on the UUV: first ROS-only command generation, then guarded MAVLink actuation.
+
+### `usv_mavlink`
+
+ROS 2 ↔ MAVLink interface for the physical BlueBoat. The first validated implementation is intentionally **read-only** and receives telemetry from BlueOS without sending ARM, DISARM, mode-change or propulsion commands.
+
+Current physical and network configuration:
+
+```text
+Vehicle                  Blue Robotics BlueBoat
+Autopilot board          Navigator
+Firmware                 ArduPilot 4.6.3 STABLE
+MAVLink vehicle type     Surface Boat
+BlueOS address           192.168.2.3
+ROS laptop address       192.168.2.1
+QGroundControl endpoint  UDP 14550
+ROS 2 endpoint           UDP 14553
+Vehicle SYSID            2
+Autopilot COMPID         1
+```
+
+The dedicated ROS endpoint is kept separate from QGroundControl so both interfaces can coexist without sharing the same UDP destination.
+
+Current telemetry topics:
+
+```text
+/usv/connected
+/usv/armed
+/usv/mode
+/usv/power/voltage
+/usv/power/current
+/usv/power/remaining
+/usv/gps/fix_type
+/usv/gps/satellites
+/usv/gps/latitude
+/usv/gps/longitude
+/usv/attitude/yaw_deg
+```
+
+Hardware validation confirmed:
+
+- MAVLink heartbeat reception through BlueOS UDP `14553`
+- Correct filtering of the BlueBoat autopilot as `SYSID=2`, `COMPID=1`
+- Surface-boat heartbeat identification
+- Armed-state and navigation-mode decoding
+- Battery voltage/current/remaining-capacity telemetry
+- GPS and global-position message reception
+- Attitude/yaw telemetry
+
+The bridge currently starts in **READ-ONLY mode**. It does not send `MANUAL_CONTROL`, ARM/DISARM commands or mode changes. Physical command output will be added only after the Xbox command path has first been validated without actuation.
 
 ### `hardware_tests`
 
@@ -1310,9 +1360,53 @@ Individual USV nodes remain available for subsystem testing through their respec
 ```text
 usv_control
 usv_hardware
+usv_mavlink
 usv_perception
 usv_teleop
 ```
+
+## BlueBoat MAVLink Telemetry
+
+The current BlueBoat MAVLink bridge is read-only. Build and source the USV workspace, then run:
+
+```bash
+ros2 run usv_mavlink mavlink_bridge_node
+```
+
+Expected startup information includes:
+
+```text
+BlueBoat MAVLink bridge started in READ-ONLY mode.
+Listening on UDP 0.0.0.0:14553
+Target autopilot: SYSID=2, COMPID=1
+BlueBoat autopilot connected.
+```
+
+Useful status topics:
+
+```bash
+ros2 topic echo /usv/connected --once
+ros2 topic echo /usv/armed --once
+ros2 topic echo /usv/mode --once
+ros2 topic echo /usv/power/voltage --once
+ros2 topic echo /usv/power/current --once
+ros2 topic echo /usv/power/remaining --once
+ros2 topic echo /usv/gps/fix_type --once
+ros2 topic echo /usv/gps/satellites --once
+ros2 topic echo /usv/gps/latitude --once
+ros2 topic echo /usv/gps/longitude --once
+ros2 topic echo /usv/attitude/yaw_deg --once
+```
+
+During the first physical validation, the bridge correctly reported the BlueBoat as connected, disarmed and in `HOLD`, while battery, GPS and attitude messages were received successfully. GPS fix may remain unavailable during indoor tests, which is expected when no satellites are visible.
+
+> **Current USV MAVLink safety state**
+>
+> - ROS 2 command output to ArduRover is not implemented in this bridge yet.
+> - ARM/DISARM transmission is not implemented yet.
+> - Mode-change transmission is not implemented yet.
+> - Xbox commands are not connected to the autopilot yet.
+> - QGroundControl remains available independently through UDP `14550`.
 
 ---
 
@@ -1372,6 +1466,8 @@ instead of requiring one terminal for every ROS 2 node.
 The current repository structure is designed to support future development including:
 
 - Vehicle-specific bringup packages
+- BlueBoat Xbox teleoperation with ROS-only preview before physical MAVLink actuation
+- Guarded BlueBoat ARM/DISARM, mode selection and manual-control output
 - Manual/autonomous command arbitration
 - Mission state machines
 - Higher-level safety and failsafe supervision
@@ -1391,7 +1487,8 @@ The current repository structure is designed to support future development inclu
 | Hardware integration | 🟡 | 🟢 | ⚪ |
 | Teleoperation | 🟢 | 🟢 | ⚪ |
 | Motion control | 🟢 | 🟢 | ⚪ |
-| MAVLink telemetry/control | 🟡 | 🟢 | ⚪ |
+| MAVLink telemetry | 🟢 | 🟢 | ⚪ |
+| MAVLink manual control | 🟡 | 🟢 | ⚪ |
 | Perception | 🟡 | 🟢 | ⚪ |
 | Simulation | 🟡 | 🟢 | ⚪ |
 | Bringup | 🟡 | 🟢 | ⚪ |
