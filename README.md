@@ -429,7 +429,7 @@ Planned commands are relative to the current state:
 ~~~text
 advance 3 m
 rotate +45 deg
-descend 1 m relative to current depth
+reach a depth of 3 m below the surface
 return to saved home position and heading
 ~~~
 
@@ -525,3 +525,7 @@ The UUV software stack is ready for the first controlled in-water telemetry test
 
 </div>
 
+
+## Previous documentation
+
+[Complete previous documentation: BlueBoat, SeaTrac and simulation](README_referencia_33b9b92.md). Historical reference; use the current UUV instructions above for the Jazzy dashboard.
