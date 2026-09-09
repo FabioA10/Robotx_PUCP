@@ -5,7 +5,7 @@ from rclpy.node import Node
 
 from sensor_msgs.msg import Joy
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool, Empty, Int8
+from std_msgs.msg import Bool, Empty, Float32, Int8
 
 
 class XboxTeleopNode(Node):
@@ -107,6 +107,8 @@ class XboxTeleopNode(Node):
 
         self.previous_dpad_up_pressed = False
         self.previous_dpad_down_pressed = False
+        self.previous_dpad_left_pressed = False
+        self.previous_dpad_right_pressed = False
 
         # =========================================================
         # Publishers
@@ -139,6 +141,18 @@ class XboxTeleopNode(Node):
         self.disarm_request_pub = self.create_publisher(
             Empty,
             '/uuv/control/disarm_request',
+            10
+        )
+
+        self.camera_tilt_pub = self.create_publisher(
+            Float32,
+            '/uuv/control/camera_tilt',
+            10
+        )
+
+        self.lights_step_pub = self.create_publisher(
+            Int8,
+            '/uuv/control/lights_step',
             10
         )
 
@@ -177,6 +191,14 @@ class XboxTeleopNode(Node):
 
         self.get_logger().info(
             'LB + D-pad UP/DOWN -> change vehicle mode.'
+        )
+
+        self.get_logger().info(
+            'D-pad UP/DOWN -> camera tilt.'
+        )
+
+        self.get_logger().info(
+            'D-pad LEFT/RIGHT -> lights -/+ 10%.'
         )
 
 
@@ -236,7 +258,7 @@ class XboxTeleopNode(Node):
 
             return
 
-        if len(msg.buttons) <= self.BUTTON_DPAD_DOWN:
+        if len(msg.buttons) <= self.BUTTON_DPAD_RIGHT:
 
             self.get_logger().warning(
                 'Joystick message does not contain expected buttons.'
@@ -279,6 +301,14 @@ class XboxTeleopNode(Node):
 
         dpad_down_pressed = (
             msg.buttons[self.BUTTON_DPAD_DOWN] == 1
+        )
+
+        dpad_left_pressed = (
+            msg.buttons[self.BUTTON_DPAD_LEFT] == 1
+        )
+
+        dpad_right_pressed = (
+            msg.buttons[self.BUTTON_DPAD_RIGHT] == 1
         )
 
         # =========================================================
@@ -396,6 +426,50 @@ class XboxTeleopNode(Node):
         self.previous_dpad_down_pressed = (
             dpad_down_pressed
         )
+
+        # =========================================================
+        # CAMERA AND LIGHTS
+        #
+        # Accessories are accepted only with LB and RB released,
+        # analog controls neutral and no DISARM request active.
+        # Camera is continuous; lights change once per button press.
+        # =========================================================
+
+        accessory_control_allowed = (
+            not lb_pressed
+            and not rb_pressed
+            and not b_pressed
+            and controls_neutral
+        )
+
+        camera_msg = Float32()
+
+        if accessory_control_allowed:
+            if dpad_up_pressed and not dpad_down_pressed:
+                camera_msg.data = 1.0
+            elif dpad_down_pressed and not dpad_up_pressed:
+                camera_msg.data = -1.0
+
+            if (
+                dpad_right_pressed
+                and not self.previous_dpad_right_pressed
+            ):
+                lights_msg = Int8()
+                lights_msg.data = 1
+                self.lights_step_pub.publish(lights_msg)
+
+            if (
+                dpad_left_pressed
+                and not self.previous_dpad_left_pressed
+            ):
+                lights_msg = Int8()
+                lights_msg.data = -1
+                self.lights_step_pub.publish(lights_msg)
+
+        self.camera_tilt_pub.publish(camera_msg)
+
+        self.previous_dpad_left_pressed = dpad_left_pressed
+        self.previous_dpad_right_pressed = dpad_right_pressed
 
 
 

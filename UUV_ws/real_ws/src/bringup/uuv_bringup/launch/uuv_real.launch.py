@@ -16,7 +16,7 @@ def generate_launch_description():
 
     camera = LaunchConfiguration('camera')
     control = LaunchConfiguration('control')
-    camera_tilt = LaunchConfiguration('camera_tilt')
+    accessory_control = LaunchConfiguration('accessory_control')
 
 
 
@@ -25,8 +25,6 @@ def generate_launch_description():
     ping360_range = LaunchConfiguration('ping360_range')
     ping360_threshold = LaunchConfiguration('ping360_threshold')
     ping360_angle_step = LaunchConfiguration('ping360_angle_step')
-
-    mavlink_url = LaunchConfiguration('mavlink_url')
 
     command_output = LaunchConfiguration('command_output')
     command_scale = LaunchConfiguration('command_scale')
@@ -43,7 +41,7 @@ def generate_launch_description():
 
         DeclareLaunchArgument(
             'sonar',
-            default_value='true',
+            default_value='false',
             description='Start Ping360 acquisition and filtering'
         ),
 
@@ -62,9 +60,9 @@ def generate_launch_description():
         ),
 
         DeclareLaunchArgument(
-            'camera_tilt',
+            'accessory_control',
             default_value='false',
-            description='Start BlueROV2 camera tilt controller'
+            description='Enable camera tilt and light output in MAVLink bridge'
         ),
 
         # ==============================================================
@@ -100,12 +98,6 @@ def generate_launch_description():
             'ping360_angle_step',
             default_value='4',
             description='Ping360 angular step'
-        ),
-
-        DeclareLaunchArgument(
-            'mavlink_url',
-            default_value='udpin:0.0.0.0:14550',
-            description='MAVLink endpoint used by vehicle control'
         ),
 
         DeclareLaunchArgument(
@@ -170,6 +162,11 @@ def generate_launch_description():
                 'enable_command_output': command_output,
                 'command_scale': command_scale,
                 'enable_arm_disarm': arm_control,
+                'enable_accessory_output': accessory_control,
+                'camera_tilt_channel': 8,
+                'lights_steps': 9,
+                'lights_dimmer_button': 13,
+                'lights_brighter_button': 14,
             }],
         ),
 
@@ -287,23 +284,6 @@ def generate_launch_description():
                 ),
 
             ],
-        ),
-
-        # ==============================================================
-        # CAMERA TILT
-        # ==============================================================
-
-        Node(
-            package='camera_control',
-            executable='camera_tilt_controller_node',
-            name='camera_tilt_controller',
-            output='screen',
-            condition=IfCondition(camera_tilt),
-            parameters=[{
-                'mavlink_url': mavlink_url,
-                'channel': 8,
-                'timeout_s': 1.0,
-            }],
         ),
 
         # ==============================================================

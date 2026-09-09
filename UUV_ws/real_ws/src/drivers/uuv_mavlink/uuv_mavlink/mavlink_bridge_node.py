@@ -4,6 +4,8 @@ import rclpy
 from rclpy.node import Node
 
 from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import Vector3Stamped
 
 from std_msgs.msg import Bool
 from std_msgs.msg import Empty
@@ -11,6 +13,7 @@ from std_msgs.msg import Float32
 from std_msgs.msg import String
 from std_msgs.msg import UInt8MultiArray
 from std_msgs.msg import Int8
+from std_msgs.msg import UInt32
 
 from pymavlink import mavutil
 
@@ -19,6 +22,17 @@ class MavlinkBridgeNode(Node):
 
     def __init__(self):
         super().__init__('uuv_mavlink_bridge')
+
+        self.declare_parameter('enable_mode_control', False)
+        self.enable_mode_control = bool(
+            self.get_parameter('enable_mode_control').value
+        )
+        self.create_subscription(
+            String,
+            '/uuv/control/mode_request',
+            self.mode_request_callback,
+            10
+        )
 
         # =========================================================
         # Parameters
@@ -127,6 +141,15 @@ class MavlinkBridgeNode(Node):
             True
         )
 
+        self.declare_parameter('enable_accessory_output', False)
+        self.declare_parameter('camera_tilt_channel', 8)
+        self.declare_parameter('accessory_min_pwm', 1100)
+        self.declare_parameter('accessory_neutral_pwm', 1500)
+        self.declare_parameter('accessory_max_pwm', 1900)
+        self.declare_parameter('lights_steps', 9)
+        self.declare_parameter('lights_dimmer_button', 13)
+        self.declare_parameter('lights_brighter_button', 14)
+
         # ---------------------------------------------------------
         # Read parameters
         # ---------------------------------------------------------
@@ -197,6 +220,32 @@ class MavlinkBridgeNode(Node):
             .bool_value
         )
 
+        self.enable_accessory_output = bool(
+            self.get_parameter('enable_accessory_output').value
+        )
+        self.camera_tilt_channel = int(
+            self.get_parameter('camera_tilt_channel').value
+        )
+        self.accessory_min_pwm = int(
+            self.get_parameter('accessory_min_pwm').value
+        )
+        self.accessory_neutral_pwm = int(
+            self.get_parameter('accessory_neutral_pwm').value
+        )
+        self.accessory_max_pwm = int(
+            self.get_parameter('accessory_max_pwm').value
+        )
+        self.lights_steps = max(
+            1,
+            int(self.get_parameter('lights_steps').value)
+        )
+        self.lights_dimmer_button = int(
+            self.get_parameter('lights_dimmer_button').value
+        )
+        self.lights_brighter_button = int(
+            self.get_parameter('lights_brighter_button').value
+        )
+
         self.command_scale = max(
             0.0,
             min(1.0, self.command_scale)
@@ -224,7 +273,13 @@ class MavlinkBridgeNode(Node):
         self.last_motor_power_state = None
         self.last_motion_allowed = None
 
+        self.lights_level = 0
+        self.pending_manual_buttons = 0
 
+        self.last_camera_command_time = None
+        self.camera_timeout_timer = self.create_timer(
+            0.1, self.check_camera_timeout
+        )
 
         # =========================================================
         # Publishers
@@ -278,6 +333,30 @@ class MavlinkBridgeNode(Node):
             10
         )
 
+        self.lights_percent_pub = self.create_publisher(
+            Float32,
+            '/uuv/accessories/lights_percent',
+            10
+        )
+
+        # Telemetría MAVLink conservando explícitamente la convención NED.
+        self.local_position_ned_pub = self.create_publisher(
+            PointStamped, '/uuv/telemetry/local_position_ned', 10)
+        self.local_velocity_ned_pub = self.create_publisher(
+            Vector3Stamped, '/uuv/telemetry/local_velocity_ned', 10)
+        self.attitude_rpy_pub = self.create_publisher(
+            Vector3Stamped, '/uuv/telemetry/attitude_rpy', 10)
+        self.heading_pub = self.create_publisher(
+            Float32, '/uuv/telemetry/heading_deg', 10)
+        self.relative_altitude_pub = self.create_publisher(
+            Float32, '/uuv/telemetry/relative_altitude_m', 10)
+        self.depth_estimate_pub = self.create_publisher(
+            Float32, '/uuv/telemetry/depth_estimate_m', 10)
+        self.pressure_abs_pub = self.create_publisher(
+            Float32, '/uuv/telemetry/pressure_abs_hpa', 10)
+        self.ekf_flags_pub = self.create_publisher(
+            UInt32, '/uuv/telemetry/ekf_status_flags', 10)
+
         # =========================================================
         # Subscribers
         # =========================================================
@@ -321,6 +400,20 @@ class MavlinkBridgeNode(Node):
             Bool,
             '/uuv/deadman',
             self.deadman_callback,
+            10
+        )
+
+        self.create_subscription(
+            Float32,
+            '/uuv/control/camera_tilt',
+            self.camera_tilt_callback,
+            10
+        )
+
+        self.create_subscription(
+            Int8,
+            '/uuv/control/lights_step',
+            self.lights_step_callback,
             10
         )
 
@@ -406,10 +499,67 @@ class MavlinkBridgeNode(Node):
                 'MAVLink command output DISABLED'
             )
 
+            if not self.enable_accessory_output:
+                self.get_logger().info(
+                    'Telemetry remains READ-ONLY.'
+                )
+
+        if self.enable_accessory_output:
+            self.get_logger().warning(
+                'Camera tilt and light output ENABLED'
+            )
+        else:
             self.get_logger().info(
-                'Telemetry remains READ-ONLY.'
+                'Camera tilt and light output DISABLED'
             )
 
+    def mode_request_callback(self, msg):
+        modes = {
+            'MANUAL': 19,
+            'ALT_HOLD': 2,
+            'POSHOLD': 16,
+        }
+        requested = msg.data.strip().upper()
+
+        if not self.enable_mode_control:
+            self.get_logger().warning('Selector de modos deshabilitado')
+            return
+
+        if requested not in modes:
+            self.get_logger().warning('Modo no permitido por el selector')
+            return
+
+        heartbeat_fresh = (
+            self.last_heartbeat_time is not None
+            and time.monotonic() - self.last_heartbeat_time
+            < self.heartbeat_timeout
+        )
+
+        if not self.connected or not heartbeat_fresh:
+            self.get_logger().warning('Cambio rechazado: sin conexión reciente')
+            return
+
+        if self.armed:
+            self.get_logger().warning(
+                'Cambio rechazado: esta prueba requiere ROV desarmado'
+            )
+            return
+
+        if self.deadman:
+            self.get_logger().warning('Cambio rechazado: suelta RB')
+            return
+
+        try:
+            self.master.mav.set_mode_send(
+                self.target_system_id,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                modes[requested]
+            )
+            self.get_logger().info(
+                f'Modo solicitado: {requested}; esperando heartbeat'
+            )
+        except Exception as exc:
+            self.get_logger().error(f'Error solicitando modo: {exc}')
 
     def mode_step_callback(self, msg):
 
@@ -666,6 +816,125 @@ class MavlinkBridgeNode(Node):
 
         self.deadman = msg.data
 
+    def camera_tilt_callback(self, msg):
+
+        if not self.accessory_command_is_allowed():
+            return
+
+        self.last_camera_command_time = time.monotonic()
+        command = self.clamp(float(msg.data), -1.0, 1.0)
+
+        if command >= 0.0:
+            pwm = int(
+                self.accessory_neutral_pwm
+                + command * (
+                    self.accessory_max_pwm
+                    - self.accessory_neutral_pwm
+                )
+            )
+        else:
+            pwm = int(
+                self.accessory_neutral_pwm
+                + command * (
+                    self.accessory_neutral_pwm
+                    - self.accessory_min_pwm
+                )
+            )
+
+        self.send_rc_override(self.camera_tilt_channel, pwm)
+
+    def check_camera_timeout(self):
+        if self.last_camera_command_time is None:
+            return
+
+        elapsed = time.monotonic() - self.last_camera_command_time
+
+        if elapsed <= 0.3:
+            return
+
+        if self.accessory_command_is_allowed():
+            self.send_rc_override(
+                self.camera_tilt_channel,
+                self.accessory_neutral_pwm
+            )
+
+        self.last_camera_command_time = None
+
+
+    def lights_step_callback(self, msg):
+
+        if not self.accessory_command_is_allowed():
+            return
+
+        step = int(msg.data)
+        if step not in (-1, 1):
+            return
+
+        new_level = max(
+            0,
+            min(
+                self.lights_steps,
+                self.lights_level + step
+            )
+        )
+
+        if new_level == self.lights_level:
+            return
+
+        self.lights_level = new_level
+
+        if step > 0:
+            button = self.lights_brighter_button
+        else:
+            button = self.lights_dimmer_button
+
+        self.pending_manual_buttons |= (1 << button)
+
+        lights_percent = (
+            100.0 * self.lights_level / self.lights_steps
+        )
+
+        state_msg = Float32()
+        state_msg.data = float(lights_percent)
+        self.lights_percent_pub.publish(state_msg)
+
+        self.get_logger().info(
+            f'Lights request: {lights_percent:.1f}% '
+            f'(level {self.lights_level}/{self.lights_steps})'
+        )
+
+    def accessory_command_is_allowed(self):
+
+        if not self.enable_accessory_output:
+            return False
+
+        if not self.connected:
+            return False
+
+        return True
+
+    def send_rc_override(self, channel, pwm):
+
+        if channel < 1 or channel > 18:
+            self.get_logger().error(
+                f'Invalid RC override channel: {channel}'
+            )
+            return
+
+        channels = [65535] * 18
+        channels[channel - 1] = int(pwm)
+
+        try:
+            self.master.mav.rc_channels_override_send(
+                self.target_system_id,
+                self.target_component_id,
+                *channels
+            )
+        except Exception as exc:
+            self.get_logger().error(
+                f'Failed to send RC override: {exc}'
+            )
+
     def rgb_indicator_callback(self, msg):
 
         if len(msg.data) != 3:
@@ -725,6 +994,102 @@ class MavlinkBridgeNode(Node):
             elif msg_type == 'SYS_STATUS':
 
                 self.process_sys_status(msg)
+
+            elif msg_type == 'LOCAL_POSITION_NED':
+
+                self.process_local_position_ned(msg)
+
+            elif msg_type == 'ATTITUDE':
+
+                self.process_attitude(msg)
+
+            elif msg_type == 'GLOBAL_POSITION_INT':
+
+                self.process_global_position(msg)
+
+            elif msg_type == 'VFR_HUD':
+
+                self.process_vfr_hud(msg)
+
+            elif msg_type == 'SCALED_PRESSURE2':
+
+                self.process_scaled_pressure2(msg)
+
+            elif msg_type == 'EKF_STATUS_REPORT':
+
+                self.process_ekf_status(msg)
+
+            elif msg_type == 'STATUSTEXT':
+                text = msg.text
+                if isinstance(text, bytes):
+                    text = text.decode('utf-8', errors='replace')
+
+                self.get_logger().warning(
+                    f'ArduSub [{msg.severity}]: {text}'
+                )
+
+            elif msg_type == 'COMMAND_ACK':
+                self.get_logger().info(
+                    f'ArduSub ACK: command={msg.command}, '
+                    f'result={msg.result}'
+                )
+
+    def _telemetry_stamp(self):
+        return self.get_clock().now().to_msg()
+
+    def process_local_position_ned(self, msg):
+        stamp = self._telemetry_stamp()
+        position = PointStamped()
+        position.header.stamp = stamp
+        position.header.frame_id = 'mavlink_local_ned'
+        position.point.x = float(msg.x)
+        position.point.y = float(msg.y)
+        position.point.z = float(msg.z)
+        self.local_position_ned_pub.publish(position)
+
+        velocity = Vector3Stamped()
+        velocity.header.stamp = stamp
+        velocity.header.frame_id = 'mavlink_local_ned'
+        velocity.vector.x = float(msg.vx)
+        velocity.vector.y = float(msg.vy)
+        velocity.vector.z = float(msg.vz)
+        self.local_velocity_ned_pub.publish(velocity)
+
+    def process_attitude(self, msg):
+        attitude = Vector3Stamped()
+        attitude.header.stamp = self._telemetry_stamp()
+        attitude.header.frame_id = 'mavlink_body_ned'
+        attitude.vector.x = float(msg.roll)
+        attitude.vector.y = float(msg.pitch)
+        attitude.vector.z = float(msg.yaw)
+        self.attitude_rpy_pub.publish(attitude)
+
+    def process_global_position(self, msg):
+        relative_altitude = Float32()
+        relative_altitude.data = float(msg.relative_alt) / 1000.0
+        self.relative_altitude_pub.publish(relative_altitude)
+        depth = Float32()
+        depth.data = max(0.0, -relative_altitude.data)
+        self.depth_estimate_pub.publish(depth)
+        if int(msg.hdg) != 65535:
+            heading = Float32()
+            heading.data = float(msg.hdg) / 100.0
+            self.heading_pub.publish(heading)
+
+    def process_vfr_hud(self, msg):
+        heading = Float32()
+        heading.data = float(msg.heading)
+        self.heading_pub.publish(heading)
+
+    def process_scaled_pressure2(self, msg):
+        pressure = Float32()
+        pressure.data = float(msg.press_abs)
+        self.pressure_abs_pub.publish(pressure)
+
+    def process_ekf_status(self, msg):
+        flags = UInt32()
+        flags.data = int(msg.flags)
+        self.ekf_flags_pub.publish(flags)
 
     def send_rgb_indicator(self, r, g, b):
 
@@ -1138,7 +1503,10 @@ class MavlinkBridgeNode(Node):
         # Critical safety gate
         # ---------------------------------------------------------
 
-        if not self.enable_command_output:
+        if (
+            not self.enable_command_output
+            and not self.enable_accessory_output
+        ):
 
             return
 
@@ -1147,7 +1515,7 @@ class MavlinkBridgeNode(Node):
 
             return
 
-        if allowed:
+        if self.enable_command_output and allowed:
 
             x, y, z, r = (
                 self.convert_to_manual_control(
@@ -1163,14 +1531,20 @@ class MavlinkBridgeNode(Node):
             z = 500
             r = 0
 
+        buttons = self.pending_manual_buttons
+
         self.master.mav.manual_control_send(
             self.target_system_id,
             x,
             y,
             z,
             r,
-            0
+            buttons
         )
+
+        # A single transmitted frame creates the button rising edge.
+        # The next 20 Hz frame contains zero and releases the button.
+        self.pending_manual_buttons = 0
 
     # =============================================================
     # Shutdown safety
@@ -1185,9 +1559,6 @@ class MavlinkBridgeNode(Node):
         # already be shutting down after Ctrl+C.
         # =========================================================
 
-        if not self.enable_command_output:
-            return
-
         if not self.connected:
             return
 
@@ -1201,7 +1572,7 @@ class MavlinkBridgeNode(Node):
         # Total duration:
         # 5 * 20 ms = ~100 ms
 
-        for _ in range(5):
+        for _ in range(5 if self.enable_command_output else 0):
 
             try:
 
@@ -1218,6 +1589,40 @@ class MavlinkBridgeNode(Node):
 
             except Exception:
                 break
+
+        if self.enable_accessory_output and self.connected:
+            try:
+                self.send_rc_override(
+                    self.camera_tilt_channel,
+                    self.accessory_neutral_pwm
+                )
+
+                # ArduSub controls Lights1 through configured joystick
+                # functions. BTN13 is dimmer on this vehicle. Repeated
+                # press/release edges guarantee a zero-light shutdown.
+                dimmer_mask = 1 << self.lights_dimmer_button
+
+                for _ in range(self.lights_steps):
+                    self.master.mav.manual_control_send(
+                        self.target_system_id,
+                        0,
+                        0,
+                        500,
+                        0,
+                        dimmer_mask
+                    )
+                    time.sleep(0.02)
+                    self.master.mav.manual_control_send(
+                        self.target_system_id,
+                        0,
+                        0,
+                        500,
+                        0,
+                        0
+                    )
+                    time.sleep(0.02)
+            except Exception:
+                pass
 
 
 def main(args=None):
