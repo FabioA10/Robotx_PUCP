@@ -13,3 +13,11 @@ __pycache__/
 .Python
 env/
 venv/
+
+# ROS2 generated dashboard artifacts
+build_dashboard/
+install_dashboard/
+log_dashboard/
+
+# Local backup snapshots
+*.before_*

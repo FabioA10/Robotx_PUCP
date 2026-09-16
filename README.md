@@ -12,11 +12,11 @@ ROS 2 · MAVLink · BlueOS · Perception · Control · Simulation · Marine Robo
 
 ---
 
-## Documentation status — 9 September 2026
+## Documentation status — 16 September 2026
 
 This README is the single operating and development reference for the repository. It combines the existing USV, SeaTrac, UUV and simulation documentation with the latest BlueROV2 bench results. A package being present is distinguished from a behavior tested on the vehicle.
 
-The current real-UUV baseline is **Ubuntu 24.04, ROS 2 Jazzy, Python 3.12 and ArduSub 4.5.7 on Navigator**. Camera video, state telemetry, Xbox input, dashboard accessories and disarmed mode requests have been exercised. Live DVL navigation and measured distance/angle accuracy still require a controlled pool test. The new sequence executor and home functions are not implemented yet.
+The current real-UUV baseline is **Ubuntu 24.04, ROS 2 Jazzy, Python 3.12 and ArduSub 4.5.7 on Navigator**. Camera video, state telemetry, Xbox input, dashboard accessories and disarmed mode requests have been exercised. Live DVL navigation and measured distance/angle accuracy still require a controlled pool test. A read-only pool dashboard and geometric sequence/Home preview are now available. Vehicle sequence execution and actual return-home are not implemented yet.
 
 The existing USV and SeaTrac results are retained below. Their older build instructions use Humble; their compatibility with Jazzy and the UUV simulation were not revalidated during this latest UUV session.
 
@@ -434,7 +434,7 @@ The DVL has not yet been validated for distance or angle accuracy in the pool. T
 | MANUAL interruption of sequences | ⚪ | Pending |
 | Pool distance/angle calibration | 🟡 | First wet test pending |
 
-The next physical step is a controlled in-water telemetry test. Autonomous movement execution remains a development task. The dashboard does not yet display the new depth, heading and navigation topics.
+The next physical step is a controlled in-water telemetry test. Autonomous movement execution remains a development task. The new `pool_dashboard_node` displays depth, attitude, heading and local navigation with reception-age indicators; the original accessory dashboard is retained.
 
 ---
 
@@ -693,9 +693,92 @@ The interface currently provides:
 
 The current source uses one GUI for both launch profiles. Its title or visible buttons do not establish which outputs are enabled: the bridge parameters determine that. Closing the dashboard triggers shutdown of the processes started by its launch file.
 
-Depth, heading, EKF status and local position/velocity now exist as ROS topics but still need dedicated GUI displays with freshness/validity indicators. Sequence execution and saved-home controls are pending.
+Depth, heading, EKF status and local position/velocity are displayed in the new pool dashboard below. Its sequence and Home controls are geometric previews only. Vehicle sequence execution and actual return-home remain pending.
 
 Camera tilt uses RC channel 8 with a 1500 µs neutral value. The added timeout requests neutral after approximately 0.3 s without a camera command, checked by a 0.1 s timer while the accessory link is available. Lights use nine increments, so the observed steps are approximately 11.1%; the published percentage is the requested software level, not measured brightness.
+
+---
+
+## Preparación de piscina y secuencias — 16 de septiembre de 2026
+
+La nueva pantalla se abre con `pool_readonly.launch.py`. Tiene tres pestañas:
+
+- **Telemetría:** profundidad estimada, rumbo, actitud, posición/velocidad NED, presión, batería, flags EKF y edad de recepción. El botón de referencia mide variación horizontal y su máximo; solo representa deriva si el vehículo permanece quieto.
+- **Cámara:** imagen del receptor existente, cuando está disponible.
+- **Secuencias:** lista editable de avances, giros, profundidades absolutas y esperas. Previsualiza objetivos geométricos desde una referencia ficticia o telemetría actual, y el regreso a un Home de ensayo. No mueve el vehículo ni representa su dinámica.
+
+El nuevo nodo no crea publicadores ROS. Su lanzamiento deshabilita explícitamente armado, modos, accesorios y propulsión en el puente. Tampoco arranca el mando. No ejecutar simultáneamente otro puente que use UDP 14552 ni otro receptor de cámara en UDP 5600. Estos bloqueos corresponden a este lanzamiento: no bloquean otras estaciones de control externas.
+
+### 1. Compilar antes de conectar el submarino
+
+Usar el entorno limpio Jazzy descrito en la sección de compilación. En esa terminal:
+
+```bash
+cd ~/Escritorio/ROS_2/Robotx_PUCP/UUV_ws/real_ws
+source /opt/ros/jazzy/setup.bash
+colcon --log-base log_dashboard build \
+  --build-base build_dashboard --install-base install_dashboard \
+  --symlink-install --packages-select uuv_dashboard uuv_mavlink bluerov2_camera
+source install_dashboard/local_setup.bash
+ros2 run uuv_dashboard pool_dashboard_node
+```
+
+Este último comando abre solo la pantalla: permite preparar secuencias con referencia ficticia mientras carga la batería. No abre el puente MAVLink ni requiere el submarino. Cerrar la ventana antes del lanzamiento completo.
+
+### 2. Primera conexión, desarmado
+
+Con la batería desconectada del cargador, conexiones y estanqueidad comprobadas, arrancar un solo lanzamiento:
+
+```bash
+ros2 launch uuv_dashboard pool_readonly.launch.py
+```
+
+Si todavía no se quiere iniciar video:
+
+```bash
+ros2 launch uuv_dashboard pool_readonly.launch.py camera:=false
+```
+
+Antes de sumergir, verificar que la pantalla muestre conexión, **armado No** y **salida de propulsión ROS No**. La lectura de profundidad en superficie debe comprobarse, no asumirse como calibración automática. Conservar un método de recuperación del vehículo y mantener el tether libre.
+
+### 3. Grabar la primera prueba en agua
+
+En otra terminal limpia con Jazzy y el overlay cargados:
+
+```bash
+cd ~/Escritorio/ROS_2/Robotx_PUCP/UUV_ws/real_ws
+source /opt/ros/jazzy/setup.bash
+source install_dashboard/local_setup.bash
+bash ../hardware_tests/pool/record_pool.sh
+```
+
+El script crea una carpeta única en `~/uuv_test_logs` y registra estado, profundidad, presión, actitud, flags EKF, posición y velocidad. Finalizar con `Ctrl+C`. No graba video, no envía comandos y no sustituye los diagnósticos del DVL en BlueOS.
+
+Con el ROV desarmado y el DVL correctamente sumergido y orientado, mantenerlo quieto durante **60 segundos** como captura inicial, tomar referencia XY y observar variación, huecos de datos y flags. Ese tiempo es una propuesta de medición, no un umbral de aprobación. Después, si la manipulación es segura, comparar cambios de profundidad, desplazamiento y giro conocidos con las lecturas. Guardar las distancias/ángulos medidos externamente junto al registro. Confirmar también que el contador/fecha de datos del DVL en BlueOS avanza; recibir telemetría del EKF no prueba bottom lock del DVL.
+
+No avanzar aún a secuencias reales. Antes faltan: validar referencia de superficie, signos/ejes, precisión y continuidad en agua; verificar la ruta de órdenes admitida por ArduSub 4.5.7 en los modos acordados; implementar arbitraje entre mando y secuencia, cancelación por MANUAL, tolerancias, tiempos máximos y manejo de fallos.
+
+### Convenciones del ensayo
+
+- Norte/Este son coordenadas locales NED. La profundidad bajo superficie es un campo separado de NED z.
+- Un giro positivo es horario/derecha. Los giros atraviesan correctamente el límite ±180°.
+- Un avance sigue el rumbo resultante de los pasos anteriores; una nueva previsualización toma de nuevo la referencia seleccionada.
+- `Profundidad = 3` significa objetivo a 3 m bajo superficie, no bajar otros 3 m. Es un ejemplo geométrico, no una profundidad autorizada para la piscina.
+- Home de ensayo se guarda solo en memoria. El regreso previsualiza profundidad, giro hacia Home, desplazamiento y rumbo final.
+- Cambiar la fuente, perder datos requeridos o perder validez EKF invalida Home de telemetría. Entrar en MANUAL descarta los objetivos previsualizados; la lista editable se conserva. No existe reanudación ni ejecución física.
+- El puente actual no publica un identificador de reinicio/origen EKF. No se puede garantizar detección de todos sus cambios; por eso este Home es únicamente de ensayo y nunca se usa para actuar.
+- La edad indica llegada al nodo ROS. El puente no permite certificar aquí la antigüedad original del sensor. El umbral visual de 3 s no es un timeout de control aprobado.
+- Los flags `39` y `167` observados en banco no incluyen posición horizontal válida; `167` además indica posición constante. La interpretación sigue la [definición oficial de EKF_STATUS_FLAGS](https://mavlink.io/en/messages/ardupilotmega.html#EKF_STATUS_FLAGS). Ninguna combinación de flags valida por sí sola la precisión ni la referencia de superficie.
+
+### Verificación de software
+
+```bash
+cd ~/Escritorio/ROS_2/Robotx_PUCP/UUV_ws/real_ws
+PYTHONPATH=src/ui/uuv_dashboard python3 -m unittest discover \
+  -s src/ui/uuv_dashboard/test -p test_pool_model.py -v
+```
+
+Pruebas de geometría y caducidad de datos ejecutadas fuera de ROS. La compilación colcon y el funcionamiento con ROS 2 Jazzy/vehículo deben confirmarse en el portátil. Este avance prepara la observación en piscina y el diseño de comandos; no certifica navegación autónoma.
 
 ---
 
