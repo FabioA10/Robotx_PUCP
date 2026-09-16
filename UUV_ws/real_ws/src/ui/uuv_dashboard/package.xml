@@ -14,6 +14,10 @@
   <depend>python_qt_binding</depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>uuv_mavlink</exec_depend>
+  <exec_depend>uuv_teleop</exec_depend>
+  <exec_depend>joy</exec_depend>
+  <exec_depend>bluerov2_camera</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

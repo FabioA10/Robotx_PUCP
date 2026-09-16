@@ -17,17 +17,17 @@ from uuv_dashboard.sequence_executor_model import ExecutionGuard, validate_steps
 
 class SequenceExecutor(Node):
     def __init__(self):
-        super().__init__('uuv_sequence_executor')
+        super().__init__('uuv_dry_run_sequence_executor')
         self.declare_parameter('enable_sequence_execution', False)
         self.enabled = bool(
             self.get_parameter('enable_sequence_execution').value)
         self.guard = ExecutionGuard()
         self.status_pub = self.create_publisher(
-            String, '/uuv/sequence/status', 10)
+            String, '/uuv/sequence_dry_run/status', 10)
         self.create_subscription(
-            String, '/uuv/sequence/request', self.request_callback, 10)
+            String, '/uuv/sequence_dry_run/request', self.request_callback, 10)
         self.create_subscription(
-            Empty, '/uuv/sequence/cancel', self.cancel_callback, 10)
+            Empty, '/uuv/sequence_dry_run/cancel', self.cancel_callback, 10)
         self.timer = self.create_timer(0.1, self.watchdog)
         self.publish_status(
             'BLOQUEADO: ejecutor de secuencia en prueba seca; no hay salida MAVLink')

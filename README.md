@@ -16,7 +16,7 @@ ROS 2 · MAVLink · BlueOS · Perception · Control · Simulation · Marine Robo
 
 This README is the single operating and development reference for the repository. It combines the existing USV, SeaTrac, UUV and simulation documentation with the latest BlueROV2 bench results. A package being present is distinguished from a behavior tested on the vehicle.
 
-The current real-UUV baseline is **Ubuntu 24.04, ROS 2 Jazzy, Python 3.12 and ArduSub 4.5.7 on Navigator**. Camera video, state telemetry, Xbox input, dashboard accessories and disarmed mode requests have been exercised. Live DVL navigation and measured distance/angle accuracy still require a controlled pool test. A read-only pool dashboard and geometric sequence/Home preview are now available. Vehicle sequence execution and actual return-home are not implemented yet.
+The current real-UUV baseline is **Ubuntu 24.04, ROS 2 Jazzy, Python 3.12 and ArduSub 4.5.7 on Navigator**. Camera video, state telemetry, Xbox input, dashboard accessories and disarmed mode requests have been exercised. Live DVL navigation and measured distance/angle accuracy still require a controlled pool test. The read-only preview is retained. A separate GUIDED sequence executor, real Home and manual cancellation are now implemented and unit-tested with mocked ROS/MAVLink; Jazzy integration and physical operation remain unvalidated. Movement output is disabled by default.
 
 The existing USV and SeaTrac results are retained below. Their older build instructions use Humble; their compatibility with Jazzy and the UUV simulation were not revalidated during this latest UUV session.
 
@@ -429,12 +429,12 @@ The DVL has not yet been validated for distance or angle accuracy in the pool. T
 | DVL message path in BlueOS | 🟡 | Source 255/0 observed; later reports were cached and live reception must be rechecked |
 | EKF local telemetry | 🟡 | Samples received intermittently; live navigation validity and wet stability pending |
 | Manual physical motion | 🟡 | Guarded path exists; disabled by default |
-| Autonomous relative movement | ⚪ | Sequence executor not implemented |
-| Set-home and return-home | ⚪ | Pending |
-| MANUAL interruption of sequences | ⚪ | Pending |
+| Autonomous relative movement | 🟡 | GUIDED executor implemented; logic tested, wet validation pending |
+| Set-home and return-home | 🟡 | Session-local Home implemented; physical return pending |
+| MANUAL interruption of sequences | 🟡 | Cancellation and discarded goals tested with mocked transport |
 | Pool distance/angle calibration | 🟡 | First wet test pending |
 
-The next physical step is a controlled in-water telemetry test. Autonomous movement execution remains a development task. The new `pool_dashboard_node` displays depth, attitude, heading and local navigation with reception-age indicators; the original accessory dashboard is retained.
+The next physical step is a controlled in-water telemetry test. The new executor is an experimental implementation, not a validated autonomous-navigation milestone. `pool_dashboard_node` remains read-only; `sequence_dashboard_node` adds explicit execution controls.
 
 ---
 
@@ -693,7 +693,7 @@ The interface currently provides:
 
 The current source uses one GUI for both launch profiles. Its title or visible buttons do not establish which outputs are enabled: the bridge parameters determine that. Closing the dashboard triggers shutdown of the processes started by its launch file.
 
-Depth, heading, EKF status and local position/velocity are displayed in the new pool dashboard below. Its sequence and Home controls are geometric previews only. Vehicle sequence execution and actual return-home remain pending.
+Depth, heading, EKF status and local position/velocity are displayed in the pool dashboard below. Its sequence and Home controls are geometric previews only. Real execution uses the separate GUIDED launch documented under Autonomous navigation.
 
 Camera tilt uses RC channel 8 with a 1500 µs neutral value. The added timeout requests neutral after approximately 0.3 s without a camera command, checked by a 0.1 s timer while the accessory link is available. Lights use nine increments, so the observed steps are approximately 11.1%; the published percentage is the requested software level, not measured brightness.
 
@@ -730,7 +730,16 @@ Este incremento permite probar la sintaxis, límites, cancelación explícita y
 watchdog de ejecutor sin conectar el ROV. No implementa `GUIDED`, arbitraje con
 el Xbox, lectura de failsafe ni una ruta MAVLink para secuencias. No cambiar el
 parámetro a `True`: el propio nodo seguirá bloqueando el plan porque ese
-transporte aún no ha sido revisado para el vehículo.
+transporte no forma parte del ejecutor seco. La ejecución GUIDED usa el nodo
+de `uuv_mavlink` y el lanzamiento `uuv_sequences.launch.py`, descritos más abajo.
+
+El ejecutor seco conserva su entrada `ros2 run uuv_dashboard sequence_executor_node`,
+pero ahora usa el nombre ROS `uuv_dry_run_sequence_executor` y los tópicos
+`/uuv/sequence_dry_run/request`, `/cancel` y `/status` bajo ese mismo prefijo.
+Los perfiles de piscina anteriores siguen usando ese ensayo; los mensajes reales
+permanecen en `/uuv/sequence/*`. En la nueva pantalla, el botón heredado de
+validación abre Ejecución real, y «Cancelar / entregar al mando» solicita MANUAL.
+No ejecutes simultáneamente los lanzamientos anteriores y el lanzamiento GUIDED.
 
 ### Perfil manual supervisado — mando Xbox
 
@@ -806,7 +815,7 @@ telemetría y DVL. El panel no reemplaza la lista de operación del fabricante.
 
 Con el ROV desarmado y el DVL correctamente sumergido y orientado, mantenerlo quieto durante **60 segundos** como captura inicial, tomar referencia XY y observar variación, huecos de datos y flags. Ese tiempo es una propuesta de medición, no un umbral de aprobación. Después, si la manipulación es segura, comparar cambios de profundidad, desplazamiento y giro conocidos con las lecturas. Guardar las distancias/ángulos medidos externamente junto al registro. Confirmar también que el contador/fecha de datos del DVL en BlueOS avanza; recibir telemetría del EKF no prueba bottom lock del DVL.
 
-No avanzar aún a secuencias reales. Antes faltan: validar referencia de superficie, signos/ejes, precisión y continuidad en agua; verificar la ruta de órdenes admitida por ArduSub 4.5.7 en los modos acordados; implementar arbitraje entre mando y secuencia, cancelación por MANUAL, tolerancias, tiempos máximos y manejo de fallos.
+Antes de ejecutar movimientos siguen pendientes las comprobaciones en agua de referencia de superficie, signos/ejes, precisión y continuidad. El ejecutor GUIDED descrito más abajo incorpora arbitraje, cancelación, tolerancias y tiempos máximos; las pruebas de lógica no sustituyen esas comprobaciones físicas.
 
 ### Convenciones del ensayo
 
@@ -958,7 +967,7 @@ A publisher count of one means the node created the topic; it does not guarantee
 
 The local topics retain MAVLink **NED**: x north, y east and z down, relative to the estimator's local origin. Their frame is `mavlink_local_ned`; do not treat these fields as ROS ENU or as forward/left/up body coordinates. `attitude_rpy` contains radians and uses the current code's `mavlink_body_ned` label. A frame label is not a published TF transform.
 
-Stamped messages currently use ROS receipt time. Float-valued topics and the EKF bitmask do not carry a header. Consumers must track recent arrivals; future sequence logic must also handle an autopilot restart or a changed local origin.
+Stamped public telemetry topics use ROS receipt time. The sequence bridge separately tracks source timestamps where available, rejects duplicates and invalidates references on detected clock rollback, origin change or position jump. These checks do not detect every possible estimator reset or buffered measurement.
 
 `depth_estimate_m` currently negates/clamps ArduSub relative altitude. `pressure_abs_hpa` is published separately from `SCALED_PRESSURE2`; the bridge does not calculate depth directly from that pressure. Verify the pressure/surface zero, sign and estimator reference before using a target such as “3 m below the surface”. Neither local NED z nor the DVL bottom range is automatically that surface-referenced depth.
 
@@ -1047,13 +1056,13 @@ Check stationary drift, update gaps, pressure/surface reference and yaw continui
 
 ---
 
-## Autonomous navigation plan
+## Autonomous navigation — experimental GUIDED execution
 
-The desired interface leaves direct manual piloting on the Xbox controller and uses the GUI for accessories, modes, movement sequences and a saved local home. These functions remain planned; the current dashboard cannot execute them.
+Direct manual piloting stays on the Xbox controller. The separate sequence GUI now handles relative moves, turns, surface-referenced depth, waits and local Home. The original accessory GUI and read-only preview remain available separately. This implementation has passed 21 fault-injection/logic tests using mocked ROS and MAVLink, including an ideal kinematic trajectory; it has not been validated in ArduSub SITL or water.
 
 | Requirement | Intended behavior |
 |---|---|
-| Allowed sequence modes | Operator-requested `ALT_HOLD` or `POSHOLD`, subject to the control interface actually supported by ArduSub 4.5.7 |
+| Allowed sequence modes | `GUIDED`, explicitly approved for this implementation; `ALT_HOLD`/`POSHOLD` are fallback hold requests, not sequence command interfaces |
 | Depth command | “Reach 3 m below the surface”, using a verified pressure/estimator surface reference; not “descend another 3 m” |
 | Horizontal movement | Relative displacement from the pose captured when a new run starts; explicitly define body-relative forward/right versus local NED axes |
 | Rotation | Relative yaw command, with angular wrap handled correctly |
@@ -1063,11 +1072,11 @@ The desired interface leaves direct manual piloting on the Xbox controller and u
 | Set home | Store local x/y, surface-referenced depth, yaw and the estimator/origin context |
 | Return home | Reach the saved depth, orient toward home, translate to its x/y position, then align to the saved home yaw |
 
-ArduSub should retain the inner stabilization and supported position/depth control loops. The ROS layer must supervise goals, freshness, tolerances and command ownership. `ALT_HOLD`/`POSHOLD` being selectable does not establish that either accepts an arbitrary MAVLink position setpoint; that firmware/interface check must precede actuator integration. Do not silently substitute another flight mode to implement the user's requested behavior.
+ArduSub retains its inner velocity/attitude control. ROS supplies bounded local NED velocities plus absolute yaw via `SET_POSITION_TARGET_LOCAL_NED`, frame 1, mask 2503. The outer position controller is provisional proportional control (gain 0.5); it requires wet tuning. Maximum horizontal speed is 0.20 m/s, vertical speed 0.10 m/s, and the heading setpoint slews at 10 degrees/s. These are command limits, not guaranteed physical speed bounds. Translation pauses when heading error exceeds 15 degrees.
 
-Manual takeover must stop autonomous command generation and clear the active run. This is a software cancellation requirement; it does not imply an instantaneous physical stop in water. The current GUI mode selector rejects changes while armed, and the existing manual bridge requires `MANUAL` for motion by default. An operational takeover/sequence-arbitration path therefore still needs implementation and testing.
+Selecting MANUAL in the sequence GUI or pressing RB during execution cancels the run and requests MANUAL. B requests disarm. A later execution requires new validation and starts from the current measured pose; old goals do not resume. Cancellation sends zero velocity and requests POSHOLD when navigation is healthy, ALT_HOLD when pressure/vertical estimation remain valid, otherwise MANUAL. If the requested fallback is not confirmed within three seconds, MANUAL is requested. Mode requests and zero setpoints are not proof of a physical stop; verify braking, buoyancy and manual handover in water.
 
-Before a real sequence can run, implement:
+Implemented supervision, still requiring integrated physical validation:
 
 1. Recent-state/validity checks and explicit coordinate/reference conversion.
 2. A sequencer with start, running, completed, cancelled and failed states.
@@ -1078,6 +1087,67 @@ Before a real sequence can run, implement:
 7. Bench/simulation checks of cancellation and goal generation, followed by measured pool trials and controller tuning.
 
 The A50 is a navigation sensor, not a guarantee of fixed position accuracy. Accuracy, drift and workable tolerances must be measured in the actual pool setup. The immediate milestone is reliable telemetry and state display; advance/turn patterns and return-home validation follow after that.
+
+### Compilar y abrir sin submarino
+
+Desde una terminal nueva:
+
+```bash
+cd ~/Escritorio/ROS_2/Robotx_PUCP/UUV_ws/real_ws
+source /opt/ros/jazzy/setup.bash
+colcon --log-base log_dashboard build --build-base build_dashboard --install-base install_dashboard --symlink-install --packages-select uuv_dashboard uuv_mavlink uuv_teleop bluerov2_camera
+source install_dashboard/local_setup.bash
+ros2 run uuv_dashboard sequence_dashboard_node
+```
+
+La pantalla puede abrirse durante la carga de batería; no necesita encender el DVL. La previsualización ficticia permanece disponible. La pestaña Ejecución real espera al ejecutor y no toma posiciones ficticias como medidas reales.
+
+Pruebas de lógica desde la raíz del repositorio, sin hardware ni ROS:
+
+```bash
+PYTHONPATH=UUV_ws/real_ws/src/drivers/uuv_mavlink python3 -m unittest discover -s UUV_ws/real_ws/src/drivers/uuv_mavlink/test -p test_sequence_system.py -v
+```
+
+### Integración en agua, inicialmente sin salida de movimiento
+
+Cierra las otras instancias del puente y del dashboard. Usa un solo puente en UDP 14552 y un solo emisor de control; no combines el joystick de Cockpit/QGroundControl ni lanzamientos antiguos con este controlador. Con el DVL montado y sumergido, el ROV desarmado y el mando conectado:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+cd ~/Escritorio/ROS_2/Robotx_PUCP/UUV_ws/real_ws
+source install_dashboard/local_setup.bash
+ros2 launch uuv_dashboard uuv_sequences.launch.py
+```
+
+La salida viene deshabilitada. El puente solicita telemetría y lee parámetros, pero no cambia parámetros ni arma el ROV. `camera:=false` permite omitir la cámara. Comprueba continuidad de posición, velocidad, rumbo, presión y mensajes DVL antes de avanzar. No mantengas el DVL funcionando fuera del agua para estas verificaciones.
+
+La pantalla exige ArduSub 4.5.7 confirmado, mensajes DVL `VISION_POSITION_DELTA` de 255/0 con confianza ≥50, EKF válido y mando reciente. La confianza de ese mensaje no es una medición independiente de bottom-lock: verifica también el estado del DVL en BlueOS. Si la extensión no reenvía esos mensajes al puerto ROS, la ejecución queda bloqueada; no se sustituye esa evidencia por valores ficticios.
+
+También lee `FS_PILOT_INPUT=2`, `FS_PILOT_TIMEOUT` entre 0.1 y 3 segundos y `SYSID_MYGCS` igual al emisor ROS (255). Un valor diferente bloquea ejecución; revisa el mensaje antes de cambiar configuración. El valor 2 implica desarmado por pérdida de entrada de piloto. Otros emisores que mantengan viva esa entrada pueden alterar la respuesta del failsafe. La detección heredada de alimentación de motores no reemplaza un failsafe de batería correctamente configurado en el autopiloto.
+
+### Ejecución supervisada después de validar la telemetría y el mando
+
+Reinicia el lanzamiento con habilitación explícita:
+
+```bash
+ros2 launch uuv_dashboard uuv_sequences.launch.py enable_sequence_output:=true
+```
+
+1. Desarmado, mantén el sensor de presión a una profundidad conocida de 0 a 0.50 m respecto a la superficie; indica ese valor y pulsa **Guardar superficie**. No indiques cero si el sensor está sumergido. La presión debe estar estable y la navegación válida durante al menos dos segundos.
+2. Pulsa **Guardar Home real**. Guarda N/E, profundidad y rumbo de esta sesión. Reiniciar el puente o perder validez de navegación invalida las referencias.
+3. Ajusta profundidad máxima y radio al espacio libre real, incluyendo márgenes para el vehículo, tether y frenado. Los valores iniciales de 1 m y 2 m no describen tu piscina. Confirma la casilla de límites.
+4. Añade pasos en la pestaña Secuencias y pulsa **Validar secuencia** en Ejecución real. Para la primera prueba usa un solo movimiento corto dentro del espacio ya comprobado, no la secuencia ficticia de 3 m.
+5. El piloto arma en MANUAL mediante X + RB, con ejes neutros; suelta RB y solicita GUIDED desde la GUI. Espera la confirmación del modo real.
+6. Pulsa **Ejecutar validación actual** y confirma el inicio. La pantalla muestra paso, objetivo, errores y tiempo restante. **Cancelar**, **MANUAL**, RB y B tienen las funciones descritas arriba.
+7. Para regresar, pulsa **Validar regreso a Home** y luego ejecuta. Home es local, no un retorno GPS ni una ruta que evite obstáculos. Se ajusta profundidad, se orienta al punto, se avanza y se recupera el rumbo guardado.
+
+Cada avance y giro toma la pose medida al comenzar su paso; la profundidad es absoluta respecto a la superficie. Los giros admiten hasta ±180°. Tolerancias iniciales: XY 0.25 m, profundidad 0.15 m y rumbo 5°, con un segundo estable y velocidad ≤0.08 m/s. Cada paso tiene 60 segundos máximos; no son valores calibrados en agua.
+
+El puente cancela si no recibe órdenes durante 0.4 s; el ejecutor cancela si pierde la GUI durante 0.5 s. La recepción de navegación caduca a los 0.8 s y heartbeat/voltaje a los 1.5 s. Se invalidan referencias ante saltos detectados de posición, cambio de origen, retroceso del reloj o incoherencia entre presión y NED z. Pequeños reinicios del estimador y datos retrasados pueden no detectarse: registra y examina las primeras pruebas. Si se pierde el enlace, la respuesta depende también del failsafe a bordo; el software en tierra no puede garantizar enviar la parada.
+
+La profundidad usada por el ejecutor es `d = d0 + (p - p0)*100/(rho*9.80665)`, con presión en hPa y `water_density:=1000.0` por defecto. La referencia es del sensor, no del centro del vehículo. No modifica calibración del autopiloto. El script de rosbag incluye los nuevos tópicos `/uuv/sequence/*` para revisar decisiones y setpoints.
+
+La ruta MAVLink se contrastó con ArduSub 4.5.7 en el commit `abe1721cf52535af6eb2340e5cabed430dac76b5`: [recepción de setpoints](https://github.com/ArduPilot/ardupilot/blob/abe1721cf52535af6eb2340e5cabed430dac76b5/ArduSub/GCS_Mavlink.cpp), [control GUIDED](https://github.com/ArduPilot/ardupilot/blob/abe1721cf52535af6eb2340e5cabed430dac76b5/ArduSub/mode_guided.cpp) y [failsafes](https://github.com/ArduPilot/ardupilot/blob/abe1721cf52535af6eb2340e5cabed430dac76b5/ArduSub/failsafe.cpp). Verificar el código fuente no certifica el comportamiento de este vehículo.
 
 ---
 
@@ -1729,7 +1799,7 @@ The optional audio node reacts to the confirmed armed-state transition, not the 
 
 Motor-power status is inferred from bus voltage, not read directly from a killswitch. Use the profile-specific thresholds listed above. The hardware stop provisions remain separate from ROS. Accessory-only operation may transmit neutral manual-control frames for light buttons; it is not a general-purpose guarantee of zero MAVLink output.
 
-The existing `MANUAL` gate protects this manual control path. It does **not** implement automatic-sequence cancellation, because the sequencer does not exist yet. Loss-of-link, takeover and actuator behavior still need supervised physical validation before autonomous tests.
+The existing `MANUAL` gate protects this manual control path. The separate sequence launch adds GUIDED ownership and automatic-sequence cancellation. Loss-of-link, takeover and actuator behavior still need supervised physical validation before autonomous tests.
 
 ---
 
@@ -1915,7 +1985,7 @@ The current repository structure is designed to support future development inclu
 | UUV user interface | Camera, state display, accessories and disarmed mode requests | Depth/yaw/EKF/position display and clear validity status |
 | UUV manual control | Xbox requests, preview, guarded MAVLink path, neutral timeout, optional audio | Supervised wet actuation/axes/stopping checks |
 | UUV DVL/EKF | BlueOS DVL source observed; EKF/local messages received in some captures | Mounted/submerged live tracking, valid hold, drift and measured tolerances |
-| UUV autonomy | Existing legacy/pipeline development packages and the requested sequence specification | New depth/distance/yaw executor, MANUAL cancellation, local home and return-home |
+| UUV autonomy | GUIDED depth/distance/yaw executor, MANUAL cancellation and local Home; mocked logic tests | Jazzy integration, wet controller tuning, cancellation and return-home measurements |
 | UUV simulation/perception | Gazebo models, sensor bridges and pipeline nodes preserved | Current environment reproducibility and transfer to physical operation |
 | USV MAVLink | Previously validated read-only BlueBoat telemetry | Xbox preview, guarded actuation, arm/disarm and mode-control integration |
 | USV hardware/perception | Existing beacon, reel/CAN, control and camera packages | Independent subsystem and integrated physical verification |
@@ -1940,7 +2010,7 @@ Shared-system status:
 1. Reproduce the documented Jazzy dashboard startup and display the new navigation telemetry with freshness/validity.
 2. Mount/submerge the DVL and log stationary live data in the pool; establish depth reference and estimator continuity.
 3. Validate permitted hold behavior and supervised manual control, then measure distance/depth/yaw response and drift.
-4. Implement and bench/simulate sequence goal generation, command arbitration, cancellation and home-reference handling.
+4. Reproduce the sequence unit tests and validate the integrated Jazzy launch; goal generation, arbitration, cancellation and Home logic are implemented.
 5. Execute measured movement patterns and return-home only after those prerequisites pass; record achieved tolerances and failure behavior.
 
 These stages must be updated from actual test results. A build, existing package, single EKF flag value or mode-selection button is not a completed autonomous-navigation milestone.

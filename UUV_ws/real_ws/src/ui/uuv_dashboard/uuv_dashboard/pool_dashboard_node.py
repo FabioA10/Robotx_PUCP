@@ -67,6 +67,7 @@ class PoolDashboard(QWidget):
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         tabs = QTabWidget()
+        self.tabs = tabs
         layout.addWidget(tabs)
         telemetry = QWidget()
         tl = QVBoxLayout(telemetry)
@@ -136,11 +137,11 @@ class PoolDashboard(QWidget):
         self.subscriptions.append(node.create_subscription(
             CompressedImage, '/camera/image/compressed', self.image, qos))
         self.sequence_request_pub = node.create_publisher(
-            String, '/uuv/sequence/request', 10)
+            String, '/uuv/sequence_dry_run/request', 10)
         self.sequence_cancel_pub = node.create_publisher(
-            Empty, '/uuv/sequence/cancel', 10)
+            Empty, '/uuv/sequence_dry_run/cancel', 10)
         self.subscriptions.append(node.create_subscription(
-            String, '/uuv/sequence/status', self.sequence_status, 10))
+            String, '/uuv/sequence_dry_run/status', self.sequence_status, 10))
         tabs.addTab(self.make_planner(), 'Secuencias · previsualización')
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)

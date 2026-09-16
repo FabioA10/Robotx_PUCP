@@ -16,6 +16,7 @@ from std_msgs.msg import Int8
 from std_msgs.msg import UInt32
 
 from pymavlink import mavutil
+from .guided_bridge import GuidedBridge
 
 
 class MavlinkBridgeNode(Node):
@@ -434,6 +435,7 @@ class MavlinkBridgeNode(Node):
             connection_string,
             source_system=self.source_system_id
         )
+        self.guided = GuidedBridge(self)
 
         # =========================================================
         # Timers
@@ -659,6 +661,8 @@ class MavlinkBridgeNode(Node):
         requested_mode, custom_mode = (
             self.mode_sequence[new_index]
         )
+        if self.guided.monitor:
+            self.guided.stop('Selector del mando: cancelación de secuencia', requested_mode)
 
 
         # ---------------------------------------------------------
@@ -758,6 +762,7 @@ class MavlinkBridgeNode(Node):
             'Sending MAVLink DISARM command'
         )
 
+        self.guided.stop('Desarmado solicitado por el mando')
         self.send_arm_disarm(False)
 
 
@@ -974,7 +979,7 @@ class MavlinkBridgeNode(Node):
 
     def read_mavlink(self):
 
-        while True:
+        for _ in range(100):
 
             msg = self.master.recv_match(
                 blocking=False
@@ -982,6 +987,8 @@ class MavlinkBridgeNode(Node):
 
             if msg is None:
                 break
+
+            self.guided.observe(msg)
 
             if (
                 msg.get_srcSystem()
@@ -1369,6 +1376,10 @@ class MavlinkBridgeNode(Node):
         if not self.connected:
             return False
 
+        if (self.last_heartbeat_time is None
+                or time.monotonic() - self.last_heartbeat_time >= self.heartbeat_timeout):
+            return False
+
         if not self.motors_enabled:
             return False
 
@@ -1522,6 +1533,10 @@ class MavlinkBridgeNode(Node):
 
             return
 
+        # GUIDED uses the dedicated watchdog and sends only neutral pilot input.
+        if self.guided.monitor and self.mode == 'GUIDED':
+            return
+
         if self.enable_command_output and allowed:
 
             x, y, z, r = (
@@ -1565,6 +1580,11 @@ class MavlinkBridgeNode(Node):
         # Do NOT use ROS logging here because the ROS context may
         # already be shutting down after Ctrl+C.
         # =========================================================
+
+        try:
+            self.guided.shutdown()
+        except Exception:
+            pass
 
         if not self.connected:
             return
