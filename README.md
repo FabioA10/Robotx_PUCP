@@ -706,8 +706,52 @@ La nueva pantalla se abre con `pool_readonly.launch.py`. Tiene tres pestañas:
 - **Telemetría:** profundidad estimada, rumbo, actitud, posición/velocidad NED, presión, batería, flags EKF y edad de recepción. El botón de referencia mide variación horizontal y su máximo; solo representa deriva si el vehículo permanece quieto.
 - **Cámara:** imagen del receptor existente, cuando está disponible.
 - **Secuencias:** lista editable de avances, giros, profundidades absolutas y esperas. Previsualiza objetivos geométricos desde una referencia ficticia o telemetría actual, y el regreso a un Home de ensayo. No mueve el vehículo ni representa su dinámica.
+- **Preflight:** lista de comprobaciones manuales y de estado ROS para la sesión de observación/registro. `LISTO` exige conexión reciente, ROV desarmado y salida ROS de propulsión deshabilitada; no autoriza movimiento.
 
-El nuevo nodo no crea publicadores ROS. Su lanzamiento deshabilita explícitamente armado, modos, accesorios y propulsión en el puente. Tampoco arranca el mando. No ejecutar simultáneamente otro puente que use UDP 14552 ni otro receptor de cámara en UDP 5600. Estos bloqueos corresponden a este lanzamiento: no bloquean otras estaciones de control externas.
+El panel no publica órdenes directas al vehículo. Sus únicos mensajes de
+secuencia son solicitudes de validación/cancelación hacia el ejecutor de prueba
+seca; el lanzamiento deshabilita explícitamente armado, modos, accesorios y
+propulsión en el puente. Tampoco arranca el mando. No ejecutar simultáneamente
+otro puente que use UDP 14552 ni otro receptor de cámara en UDP 5600. Estos
+bloqueos corresponden a este lanzamiento: no bloquean otras estaciones de
+control externas.
+
+### Ejecutor de prueba seca — sin transporte hacia el vehículo
+
+El mismo lanzamiento incluye `sequence_executor_node`, pero su parámetro
+`enable_sequence_execution` queda en `False`. La interfaz puede enviar una
+solicitud de **validación** y una cancelación: el nodo comprueba que los pasos
+estén bien formados y dentro de los límites de software de ensayo (16 pasos,
+2 m por avance, 90° por giro, 3 m de profundidad, 5 m acumulados y 30 s de
+espera acumulada). Después publica que la salida está bloqueada. No publica
+setpoints, no cambia de modo y no llama a MAVLink.
+
+Este incremento permite probar la sintaxis, límites, cancelación explícita y
+watchdog de ejecutor sin conectar el ROV. No implementa `GUIDED`, arbitraje con
+el Xbox, lectura de failsafe ni una ruta MAVLink para secuencias. No cambiar el
+parámetro a `True`: el propio nodo seguirá bloqueando el plan porque ese
+transporte aún no ha sido revisado para el vehículo.
+
+### Perfil manual supervisado — mando Xbox
+
+`pool_manual.launch.py` reúne el tablero de piscina con el mando Xbox ya
+existente. Sus parámetros `manual_output`, `arm_control`, `accessory_control`
+y `mode_control` empiezan en `false`. La pantalla muestra RB/deadman, permiso
+de movimiento MAVLink y el modo confirmado por el heartbeat. Con
+`mode_control:=true`, permite solicitar `MANUAL`, `ALT_HOLD`, `POSHOLD` o
+`GUIDED` únicamente si el ROV está conectado, desarmado y RB está suelto.
+Seleccionar `GUIDED` no inicia el ejecutor ni genera setpoints.
+
+Con el mismo `mode_control:=true`, el cambio escalonado que ya existe en el
+mando (`LB` + cruceta arriba/abajo) queda habilitado sin habilitar propulsión.
+El puente exige conexión, alimentación de propulsión, ROV desarmado y RB
+suelto. El tablero refleja el modo que confirma el siguiente *heartbeat*.
+
+El piloto manual usa exclusivamente el mando Xbox y conserva los bloqueos del
+puente: conexión, alimentación de propulsión, RB mantenido, comando reciente,
+ROV armado y modo `MANUAL`. La interfaz no ofrece ejes virtuales ni una ruta de
+movimiento autónomo. La primera prueba de este perfil debe mantener
+`manual_output:=false` y `arm_control:=false`.
 
 ### 1. Compilar antes de conectar el submarino
 
@@ -754,6 +798,12 @@ bash ../hardware_tests/pool/record_pool.sh
 
 El script crea una carpeta única en `~/uuv_test_logs` y registra estado, profundidad, presión, actitud, flags EKF, posición y velocidad. Finalizar con `Ctrl+C`. No graba video, no envía comandos y no sustituye los diagnósticos del DVL en BlueOS.
 
+En la pestaña **Preflight**, marcar solamente comprobaciones que se hayan
+observado físicamente. Si se exige cámara, arrancar el lanzamiento con
+`camera:=true` únicamente cuando el emisor de video del ROV esté disponible;
+sin video, usar `camera:=false` y la sesión puede seguir siendo válida para
+telemetría y DVL. El panel no reemplaza la lista de operación del fabricante.
+
 Con el ROV desarmado y el DVL correctamente sumergido y orientado, mantenerlo quieto durante **60 segundos** como captura inicial, tomar referencia XY y observar variación, huecos de datos y flags. Ese tiempo es una propuesta de medición, no un umbral de aprobación. Después, si la manipulación es segura, comparar cambios de profundidad, desplazamiento y giro conocidos con las lecturas. Guardar las distancias/ángulos medidos externamente junto al registro. Confirmar también que el contador/fecha de datos del DVL en BlueOS avanza; recibir telemetría del EKF no prueba bottom lock del DVL.
 
 No avanzar aún a secuencias reales. Antes faltan: validar referencia de superficie, signos/ejes, precisión y continuidad en agua; verificar la ruta de órdenes admitida por ArduSub 4.5.7 en los modos acordados; implementar arbitraje entre mando y secuencia, cancelación por MANUAL, tolerancias, tiempos máximos y manejo de fallos.
@@ -775,10 +825,13 @@ No avanzar aún a secuencias reales. Antes faltan: validar referencia de superfi
 ```bash
 cd ~/Escritorio/ROS_2/Robotx_PUCP/UUV_ws/real_ws
 PYTHONPATH=src/ui/uuv_dashboard python3 -m unittest discover \
-  -s src/ui/uuv_dashboard/test -p test_pool_model.py -v
+  -s src/ui/uuv_dashboard/test -p 'test_*model.py' -v
 ```
 
-Pruebas de geometría y caducidad de datos ejecutadas fuera de ROS. La compilación colcon y el funcionamiento con ROS 2 Jazzy/vehículo deben confirmarse en el portátil. Este avance prepara la observación en piscina y el diseño de comandos; no certifica navegación autónoma.
+Pruebas de geometría, caducidad de datos, límites, cancelación y watchdog del
+ejecutor ejecutadas fuera de ROS. La compilación colcon y el funcionamiento con
+ROS 2 Jazzy/vehículo deben confirmarse en el portátil. Este avance prepara la
+observación en piscina y el diseño de comandos; no certifica navegación autónoma.
 
 ---
 

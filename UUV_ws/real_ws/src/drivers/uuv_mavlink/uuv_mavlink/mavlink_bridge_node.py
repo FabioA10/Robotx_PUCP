@@ -518,6 +518,7 @@ class MavlinkBridgeNode(Node):
             'MANUAL': 19,
             'ALT_HOLD': 2,
             'POSHOLD': 16,
+            'GUIDED': 4,
         }
         requested = msg.data.strip().upper()
 
@@ -567,15 +568,21 @@ class MavlinkBridgeNode(Node):
         # Safety checks
         # ---------------------------------------------------------
 
-        if not self.enable_command_output:
+        if not self.enable_mode_control:
             self.get_logger().warning(
-                'MODE change rejected: command output disabled'
+                'MODE change rejected: mode control disabled'
             )
             return
 
         if not self.connected:
             self.get_logger().warning(
                 'MODE change rejected: MAVLink disconnected'
+            )
+            return
+
+        if self.armed:
+            self.get_logger().warning(
+                'MODE change rejected: ROV must be disarmed'
             )
             return
 

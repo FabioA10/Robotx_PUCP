@@ -32,6 +32,10 @@ class Telemetry:
         sample = self.samples.get(key)
         return self.clock() - sample[1] if sample else None
 
+    def stamp(self, key):
+        sample = self.samples.get(key)
+        return sample[1] if sample else None
+
     def get(self, key, timeout=3.0):
         sample = self.samples.get(key)
         if sample is None:

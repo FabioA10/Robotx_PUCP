@@ -20,4 +20,5 @@ exec ros2 bag record -o "$pool_output" \
     /uuv/telemetry/local_velocity_ned \
     /uuv/telemetry/attitude_rpy /uuv/telemetry/heading_deg \
     /uuv/telemetry/depth_estimate_m /uuv/telemetry/relative_altitude_m \
-    /uuv/telemetry/pressure_abs_hpa /uuv/telemetry/ekf_status_flags
+    /uuv/telemetry/pressure_abs_hpa /uuv/telemetry/ekf_status_flags \
+    /uuv/sequence/status

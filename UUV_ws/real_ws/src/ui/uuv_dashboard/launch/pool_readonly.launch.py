@@ -12,6 +12,10 @@ from launch_ros.actions import Node
 def generate_launch_description():
     dashboard = Node(package='uuv_dashboard', executable='pool_dashboard_node',
                      output='screen')
+    executor = Node(
+        package='uuv_dashboard', executable='sequence_executor_node', output='screen',
+        parameters=[{'enable_sequence_execution': False}],
+    )
     bridge = Node(
         package='uuv_mavlink', executable='mavlink_bridge_node', output='screen',
         parameters=[{
@@ -35,6 +39,7 @@ def generate_launch_description():
             on_exit=[EmitEvent(event=Shutdown(reason='Puente MAVLink cerrado'))],
         )),
         bridge,
+        executor,
         Node(package='bluerov2_camera', executable='video_publisher',
              output='screen', condition=IfCondition(LaunchConfiguration('camera'))),
         dashboard,

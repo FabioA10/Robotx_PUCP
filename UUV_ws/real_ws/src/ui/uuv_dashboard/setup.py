@@ -28,6 +28,7 @@ setup(
         'console_scripts': [
             'dashboard_node = uuv_dashboard.dashboard_node:main',
             'pool_dashboard_node = uuv_dashboard.pool_dashboard_node:main',
+            'sequence_executor_node = uuv_dashboard.sequence_executor_node:main',
         ],
     },
 )
