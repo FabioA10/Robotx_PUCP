@@ -72,7 +72,7 @@ class Mav:
 class FakeBridge(FakeNode):
     def __init__(self, enabled=True):
         super().__init__()
-        self.parameters.update(sequence_monitor_enabled=True, enable_sequence_output=enabled)
+        self.parameters.update(sequence_monitor_enabled=True, enable_sequence_output=enabled, dvl_rest_base_url='')
         self.enable_command_output = enabled
         self.require_manual_mode = True
         self.connected = True
@@ -295,6 +295,91 @@ class TestGuidedTransport(unittest.TestCase):
         epoch = self.g.nav_epoch
         self.g.put('yaw', 0, 1)
         self.assertGreater(self.g.nav_epoch, epoch)
+
+
+    def test_zero_dvl_timestamp_refreshes_arrival_and_expires_on_silence(self):
+        packet = Packet(kind='VISION_POSITION_DELTA', sysid=255, compid=0,
+                        confidence=99.7, position_delta=[0.0001, 0, 0],
+                        angle_delta=[0, 0, 0], time_usec=0, time_delta_usec=78440)
+        epoch = self.g.nav_epoch
+        # Identical deltas can legitimately occur while the ROV is stationary.
+        for _ in range(25):
+            self.now += 0.08
+            self.g.observe(packet)
+            self.assertEqual(self.g.get('dvl'), 99.7)
+        self.assertEqual(self.g.nav_epoch, epoch)
+        self.now += 0.79
+        self.assertEqual(self.g.get('dvl'), 99.7)
+        self.now += 0.02
+        self.assertIsNone(self.g.get('dvl'))
+        self.assertIn('Sin datos recientes: dvl', self.g.health())
+
+    def test_zero_timestamp_still_requires_correct_source_and_valid_fields(self):
+        self.g.samples.pop('dvl')
+        fields = dict(kind='VISION_POSITION_DELTA', sysid=255, compid=0,
+                      confidence=99.7, position_delta=[0, 0, 0],
+                      angle_delta=[0, 0, 0], time_usec=0, time_delta_usec=75000)
+        for change in ({'sysid': 99}, {'compid': 1}, {'confidence': float('nan')},
+                       {'time_delta_usec': 0}, {'time_usec': -1}):
+            self.g.observe(Packet(**dict(fields, **change)))
+            self.assertIsNone(self.g.get('dvl'), change)
+        self.g.observe(Packet(**dict(fields, confidence=20)))
+        self.assertIn('Confianza del mensaje DVL insuficiente', self.g.health())
+
+    def test_positive_dvl_timestamp_checks_survive_zero_timestamp_packets(self):
+        fields = dict(kind='VISION_POSITION_DELTA', sysid=255, compid=0,
+                      confidence=90, position_delta=[0, 0, 0],
+                      angle_delta=[0, 0, 0], time_delta_usec=75000)
+        self.g.observe(Packet(**fields, time_usec=100000))
+        self.now += 0.1
+        self.g.observe(Packet(**fields, time_usec=0))
+        self.now += 0.81
+        self.g.observe(Packet(**fields, time_usec=100000))
+        self.assertIsNone(self.g.get('dvl'))
+        self.g.observe(Packet(**fields, time_usec=175000))
+        self.assertEqual(self.g.get('dvl'), 90)
+        epoch = self.g.nav_epoch
+        self.g.observe(Packet(**fields, time_usec=1))
+        self.assertGreater(self.g.nav_epoch, epoch)
+
+    @staticmethod
+    def rest_dvl(counter, confidence=99.7, updated=None, **changes):
+        message = dict(type='VISION_POSITION_DELTA', confidence=confidence,
+                       position_delta=[0.0001, 0, 0], angle_delta=[0, 0, 0],
+                       time_delta_usec=80000, time_usec=0)
+        message.update(changes)
+        return {'message': message,
+                'status': {'time': {'counter': counter,
+                                    'last_update': updated or f'update-{counter}'}}}
+
+    def test_rest_dvl_needs_advancing_counter_and_expires(self):
+        self.g.samples.pop('dvl')
+        self.g.observe_rest_dvl(self.rest_dvl(100))
+        self.assertIsNone(self.g.get('dvl'))
+        self.g.observe_rest_dvl(self.rest_dvl(101))
+        self.assertEqual(self.g.get('dvl'), 99.7)
+        self.assertEqual(self.g.dvl_input, 'mavlink2rest')
+        self.now += 0.81
+        self.g.observe_rest_dvl(self.rest_dvl(101))
+        self.assertIsNone(self.g.get('dvl'))
+        self.g.observe_rest_dvl(self.rest_dvl(102))
+        self.assertEqual(self.g.get('dvl'), 99.7)
+
+    def test_rest_dvl_rejects_bad_data_and_invalidates_on_counter_reset(self):
+        self.g.samples.pop('dvl')
+        self.g.observe_rest_dvl(self.rest_dvl(200))
+        self.g.observe_rest_dvl(self.rest_dvl(201, confidence=float('nan')))
+        self.assertIsNone(self.g.get('dvl'))
+        self.g.observe_rest_dvl(self.rest_dvl(202, time_delta_usec=0))
+        self.assertIsNone(self.g.get('dvl'))
+        self.g.observe_rest_dvl(self.rest_dvl(203))
+        self.assertEqual(self.g.get('dvl'), 99.7)
+        epoch = self.g.nav_epoch
+        self.g.observe_rest_dvl(self.rest_dvl(1))
+        self.assertGreater(self.g.nav_epoch, epoch)
+        self.assertIsNone(self.g.get('dvl'))
+        self.g.observe_rest_dvl(self.rest_dvl(2))
+        self.assertEqual(self.g.get('dvl'), 99.7)
 
 
 class TestExecutor(unittest.TestCase):

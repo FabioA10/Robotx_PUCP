@@ -3,8 +3,11 @@
 from collections import deque
 import json
 import math
+from queue import Empty, Full, Queue
+from threading import Event, Thread
 import time
 import uuid
+from urllib.request import urlopen
 
 from std_msgs.msg import String
 from .sequence_core import number
@@ -18,6 +21,9 @@ class GuidedBridge:
             'sequence_monitor_enabled': False, 'enable_sequence_output': False,
             'dvl_source_system': 255, 'dvl_source_component': 0,
             'dvl_min_confidence': 50.0,
+            'dvl_rest_base_url': 'http://192.168.2.2/mavlink2rest/mavlink',
+            'dvl_rest_poll_period_s': 0.10,
+            'dvl_rest_timeout_s': 0.30,
         }
         for name, value in defaults.items():
             bridge.declare_parameter(name, value)
@@ -26,6 +32,15 @@ class GuidedBridge:
         self.dvl_ids = (int(bridge.get_parameter('dvl_source_system').value),
                         int(bridge.get_parameter('dvl_source_component').value))
         self.min_confidence = float(bridge.get_parameter('dvl_min_confidence').value)
+        self.dvl_rest_base = str(
+            bridge.get_parameter('dvl_rest_base_url').value).rstrip('/')
+        self.dvl_rest_period = float(
+            bridge.get_parameter('dvl_rest_poll_period_s').value)
+        self.dvl_rest_timeout = float(
+            bridge.get_parameter('dvl_rest_timeout_s').value)
+        if self.dvl_rest_base and (not 0.05 <= self.dvl_rest_period <= 0.5
+                                   or not 0.05 <= self.dvl_rest_timeout <= 1.0):
+            raise ValueError('Intervalos REST del DVL fuera de límites seguros')
         if self.enabled and (not self.monitor or not bridge.enable_command_output
                              or not bridge.require_manual_mode):
             raise ValueError('GUIDED necesita monitor, salida manual y require_manual_mode=true')
@@ -35,6 +50,11 @@ class GuidedBridge:
         self.samples = {}
         self.source_times = {}
         self.params = {}
+        self.dvl_input = None
+        self.dvl_rest_marker = None
+        self.dvl_rest_queue = Queue(maxsize=1)
+        self.dvl_rest_stop = Event()
+        self.dvl_rest_thread = None
         self.version = None
         self.origin = None
         self.tokens = deque(maxlen=30)
@@ -53,6 +73,10 @@ class GuidedBridge:
         bridge.create_subscription(String, '/uuv/sequence/setpoint', self.receive, 1)
         bridge.create_subscription(String, '/uuv/sequence/transport_action', self.action, 10)
         self.timer = bridge.create_timer(0.05, self.tick)
+        if self.monitor and self.dvl_rest_base:
+            self.dvl_rest_thread = Thread(
+                target=self._dvl_rest_loop, name='uuv-dvl-rest', daemon=True)
+            self.dvl_rest_thread.start()
 
     def put(self, key, value, source_time=None):
         now = self.clock()
@@ -81,6 +105,97 @@ class GuidedBridge:
             return None
         return item[0]
 
+    def accept_dvl(self, confidence, position_delta, angle_delta,
+                   time_delta_usec, source_time=None, transport=None):
+        confidence = number(confidence)
+        values = list(position_delta) + list(angle_delta)
+        for value in values:
+            number(value)
+        delta = int(time_delta_usec)
+        if not 0 < delta <= 1000000 or not 0 <= confidence <= 100:
+            return False
+        if source_time is not None:
+            source_time = int(source_time)
+            if source_time < 0:
+                return False
+            # Water Linked BlueOS v1.0.10 sends time_usec=0 for every delta.
+            # Zero supplies no acquisition timestamp: freshness then means
+            # local packet arrival, not measurement age or replay protection.
+            # Positive timestamps retain duplicate/clock-reset checks.
+            source_time = source_time if source_time > 0 else None
+        self.put('dvl', confidence, source_time)
+        self.dvl_input = transport
+        return True
+
+    def observe_rest_dvl(self, payload):
+        """Validate one Mavlink2Rest snapshot; only an advancing counter is live."""
+        try:
+            message = payload['message']
+            status = payload['status']['time']
+            if message.get('type') != 'VISION_POSITION_DELTA':
+                return
+            counter = status['counter']
+            updated = status['last_update']
+            if type(counter) is not int or counter < 0 or not isinstance(updated, str) or not updated:
+                return
+            marker = (counter, updated)
+            previous = self.dvl_rest_marker
+            self.dvl_rest_marker = marker
+            # A single cached HTTP response is not proof of a live DVL. Require
+            # a second, newer sample before satisfying the navigation guard.
+            if previous is None:
+                return
+            if counter < previous[0]:
+                self.reset_navigation('Reinicio del contador DVL: referencias invalidadas')
+                return
+            if counter == previous[0] or updated == previous[1]:
+                return
+            self.accept_dvl(
+                message['confidence'], message['position_delta'],
+                message['angle_delta'], message['time_delta_usec'],
+                message.get('time_usec'), 'mavlink2rest')
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return
+
+    def drain_rest_dvl(self):
+        while True:
+            try:
+                payload = self.dvl_rest_queue.get_nowait()
+            except Empty:
+                return
+            self.observe_rest_dvl(payload)
+
+    def _queue_rest_dvl(self, payload):
+        try:
+            self.dvl_rest_queue.put_nowait(payload)
+        except Full:
+            try:
+                self.dvl_rest_queue.get_nowait()
+            except Empty:
+                pass
+            try:
+                self.dvl_rest_queue.put_nowait(payload)
+            except Full:
+                pass
+
+    def _dvl_rest_loop(self):
+        system, component = self.dvl_ids
+        url = (f'{self.dvl_rest_base}/vehicles/{system}/components/{component}'
+               '/messages/VISION_POSITION_DELTA')
+        while not self.dvl_rest_stop.is_set():
+            started = time.monotonic()
+            try:
+                with urlopen(url, timeout=self.dvl_rest_timeout) as response:
+                    if getattr(response, 'status', 200) != 200:
+                        raise ValueError('HTTP DVL no disponible')
+                    self._queue_rest_dvl(json.load(response))
+            except Exception:
+                # The normal freshness guard reports loss of data. Network
+                # failures must never block this thread or the ROS watchdog.
+                pass
+            elapsed = time.monotonic() - started
+            self.dvl_rest_stop.wait(max(0.0, self.dvl_rest_period - elapsed))
+
     def observe(self, msg):
         if not self.monitor:
             return
@@ -88,13 +203,9 @@ class GuidedBridge:
         source = (msg.get_srcSystem(), msg.get_srcComponent())
         try:
             if kind == 'VISION_POSITION_DELTA' and source == self.dvl_ids:
-                confidence = number(msg.confidence)
-                values = list(msg.position_delta) + list(msg.angle_delta)
-                for value in values:
-                    number(value)
-                if not 0 < msg.time_delta_usec <= 1000000 or not 0 <= confidence <= 100:
-                    return
-                self.put('dvl', confidence, int(msg.time_usec))
+                self.accept_dvl(
+                    msg.confidence, msg.position_delta, msg.angle_delta,
+                    msg.time_delta_usec, msg.time_usec, 'udp')
                 return
             if source != (self.b.target_system_id, self.b.target_component_id):
                 return
@@ -289,6 +400,7 @@ class GuidedBridge:
         now = self.clock()
         b = self.b
         try:
+            self.drain_rest_dvl()
             self.requests()
             if b.mode != self.mode_at_last_tick or b.armed != self.armed_at_last_tick:
                 self.stop('Cambio de modo/armado; se requiere nueva ejecución')
@@ -327,6 +439,7 @@ class GuidedBridge:
                 'health': self.health(), 'blockers': self.output_reasons(),
                 'reason': self.last_reason, 'owner': self.owner,
                 'version': self.version, 'stopping': self.abort_mode,
+                'dvl_input': self.dvl_input,
                 'samples': {k: self.get(k, 1.5 if k == 'voltage' else 0.8) for k in self.samples},
             }
             out = String()
@@ -340,4 +453,7 @@ class GuidedBridge:
         if self.enabled and self.b.connected and self.owner and self.b.mode == 'GUIDED':
             self.send_stop()
             self.set_mode(self.holding_mode())
+        self.dvl_rest_stop.set()
+        if self.dvl_rest_thread is not None:
+            self.dvl_rest_thread.join(timeout=self.dvl_rest_timeout + 0.2)
         self.stop('Puente cerrado')
