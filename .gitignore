@@ -21,3 +21,20 @@ log_dashboard/
 
 # Local backup snapshots
 *.before_*
+
+# RobotX local hardware data
+recordings/
+*.mcap
+*.mcap.zstd
+*.db3
+mav.tlog
+mav.tlog.raw
+mav.parm
+*.BIN
+
+# Local diagnostic captures
+diagnostico_DVL_*/
+diagnostico_DVL_*.zip
+diagnostico_DVL_*.tar.*
+UUV_ws/real_ws/~/
+UUV_ws/real_ws/ping360_bags_inventario.txt
