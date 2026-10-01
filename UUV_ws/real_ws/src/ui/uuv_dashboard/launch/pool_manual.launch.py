@@ -1,4 +1,5 @@
-"""Supervised Xbox-pilot profile for later, manual-only pool trials.
+"""
+Supervised Xbox-pilot profile for later, manual-only pool trials.
 
 All physical outputs remain false by default.  There is no sequence transport
 and no GUI axis-control path in this launch: the established Xbox teleop node

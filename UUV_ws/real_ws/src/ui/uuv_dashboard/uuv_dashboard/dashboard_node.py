@@ -2,18 +2,23 @@ import signal
 import sys
 import time
 
+from python_qt_binding.QtCore import Qt, QTimer
+from python_qt_binding.QtGui import QPixmap
+from python_qt_binding.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage
-from std_msgs.msg import Bool, Float32, String, Int8
-from python_qt_binding.QtCore import Qt, QTimer
-from python_qt_binding.QtGui import QPixmap
-from python_qt_binding.QtWidgets import QPushButton, QHBoxLayout
-from python_qt_binding.QtWidgets import (
-    QApplication, QGridLayout, QLabel, QVBoxLayout, QWidget,
-)
-from python_qt_binding.QtWidgets import QComboBox
+from std_msgs.msg import Bool, Float32, Int8, String
 
 
 class Dashboard(QWidget):
@@ -196,7 +201,6 @@ class Dashboard(QWidget):
             ))
         else:
             self.video.setText('Sin video reciente')
-
 
     def accessories_ready(self):
         return (

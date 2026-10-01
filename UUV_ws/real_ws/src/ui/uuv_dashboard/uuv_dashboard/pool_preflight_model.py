@@ -12,7 +12,8 @@ REQUIRED_CHECKS = (
 
 def evaluate(manual_checks, *, connected, armed, output_enabled,
              camera_required=False, camera_available=False):
-    """Return ``(ready, reasons)`` without changing vehicle state.
+    """
+    Return ``(ready, reasons)`` without changing vehicle state.
 
     A ready result only permits the observation/recording session described by
     the read-only launch.  It is never authorization to arm or move the ROV.

@@ -18,6 +18,8 @@
   <exec_depend>uuv_teleop</exec_depend>
   <exec_depend>joy</exec_depend>
   <exec_depend>bluerov2_camera</exec_depend>
+  <exec_depend>ping360_ros2</exec_depend>
+  <exec_depend>ping360_filter</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

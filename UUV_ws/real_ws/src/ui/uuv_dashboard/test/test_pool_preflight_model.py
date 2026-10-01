@@ -2,11 +2,11 @@
 
 import unittest
 
-from uuv_dashboard.pool_preflight_model import REQUIRED_CHECKS, evaluate
+from uuv_dashboard.pool_preflight_model import evaluate, REQUIRED_CHECKS
 
 
 def complete_checks():
-    return {name: True for name in REQUIRED_CHECKS}
+    return dict.fromkeys(REQUIRED_CHECKS, True)
 
 
 class TestPoolPreflight(unittest.TestCase):

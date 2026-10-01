@@ -83,7 +83,8 @@ class Pose:
 
 
 def preview(start, steps):
-    """Sequential ideal targets. A new preview always starts from start.
+    """
+    Sequential ideal targets. A new preview always starts from start.
 
     NED yaw is clockwise positive. Depth is a separate surface reference,
     never local NED z. No timing, motion or controller execution is implied.

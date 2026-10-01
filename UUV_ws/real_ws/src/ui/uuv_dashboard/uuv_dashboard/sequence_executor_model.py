@@ -1,4 +1,5 @@
-"""Pure safety gate for the future UUV sequence executor.
+"""
+Pure safety gate for the future UUV sequence executor.
 
 This module deliberately has no ROS or MAVLink dependency.  It validates a
 small test plan and models the cancellation/watchdog decisions so they can be
@@ -9,9 +10,35 @@ from dataclasses import dataclass
 import math
 
 
+def replace_step(steps, index, step):
+    """Return a copy of *steps* with one validated list position replaced."""
+    if not isinstance(index, int) or not 0 <= index < len(steps):
+        raise IndexError('No hay una orden seleccionada')
+    if not isinstance(step, dict) or not isinstance(step.get('kind'), str):
+        raise ValueError('La orden editada no es válida')
+    result = list(steps)
+    result[index] = dict(step)
+    return result
+
+
+def move_step(steps, index, offset):
+    """Return ``(copy, new_index)`` after moving one step by one position."""
+    if not isinstance(index, int) or not 0 <= index < len(steps):
+        raise IndexError('No hay una orden seleccionada')
+    if offset not in (-1, 1):
+        raise ValueError('El desplazamiento debe ser -1 o 1')
+    target = index + offset
+    if not 0 <= target < len(steps):
+        return list(steps), index
+    result = list(steps)
+    result[index], result[target] = result[target], result[index]
+    return result, target
+
+
 @dataclass(frozen=True)
 class Limits:
-    """Conservative software limits for a future, supervised pool test.
+    """
+    Conservative software limits for a future, supervised pool test.
 
     They are validation limits, not a statement that a pool or vehicle is safe
     at these values.
@@ -71,7 +98,8 @@ def validate_steps(steps, limits=Limits()):
 
 
 class ExecutionGuard:
-    """State and watchdog for a future physical executor.
+    """
+    State and watchdog for a future physical executor.
 
     The caller must keep ``output_enabled`` false until the complete vehicle
     transport has separately been validated.  A heartbeat loss and every
@@ -116,9 +144,7 @@ class ExecutionGuard:
             return True
         return False
 
-    def allowed(self, *, connected, armed, mode, telemetry_ok,
-                failsafe_ok, output_enabled):
+    def allowed(self, *, connected, armed, mode, telemetry_ok, failsafe_ok, output_enabled):
         if self.state != self.ACTIVE:
             return False
-        return all((connected, armed, mode == 'GUIDED', telemetry_ok,
-                    failsafe_ok, output_enabled))
+        return all((connected, armed, mode == 'GUIDED', telemetry_ok, failsafe_ok, output_enabled))

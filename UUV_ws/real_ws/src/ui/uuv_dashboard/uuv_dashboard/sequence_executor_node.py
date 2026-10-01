@@ -1,4 +1,5 @@
-"""Default-disabled dry-run endpoint for future pool sequence execution.
+"""
+Default-disabled dry-run endpoint for future pool sequence execution.
 
 It accepts a JSON plan from the pool dashboard only to validate it and publish
 its state.  It intentionally sends no vehicle commands and must not be treated

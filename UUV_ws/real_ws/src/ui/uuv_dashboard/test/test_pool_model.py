@@ -4,7 +4,12 @@ import math
 import unittest
 
 from uuv_dashboard.pool_model import (
-    Pose, Telemetry, ekf_description, home_steps, preview, wrap_deg,
+    ekf_description,
+    home_steps,
+    Pose,
+    preview,
+    Telemetry,
+    wrap_deg,
 )
 
 
