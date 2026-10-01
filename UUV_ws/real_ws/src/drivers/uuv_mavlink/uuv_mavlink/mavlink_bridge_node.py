@@ -1,21 +1,11 @@
 import time
 
+from geometry_msgs.msg import PointStamped, Twist, Vector3Stamped
+from pymavlink import mavutil
 import rclpy
 from rclpy.node import Node
+from std_msgs.msg import Bool, Empty, Float32, Int8, String, UInt32, UInt8MultiArray
 
-from geometry_msgs.msg import Twist
-from geometry_msgs.msg import PointStamped
-from geometry_msgs.msg import Vector3Stamped
-
-from std_msgs.msg import Bool
-from std_msgs.msg import Empty
-from std_msgs.msg import Float32
-from std_msgs.msg import String
-from std_msgs.msg import UInt8MultiArray
-from std_msgs.msg import Int8
-from std_msgs.msg import UInt32
-
-from pymavlink import mavutil
 from .guided_bridge import GuidedBridge
 
 
@@ -96,7 +86,6 @@ class MavlinkBridgeNode(Node):
             .get_parameter_value()
             .bool_value
         )
-
 
         self.declare_parameter('udp_port', 14552)
 
@@ -600,7 +589,6 @@ class MavlinkBridgeNode(Node):
             )
             return
 
-
         # ---------------------------------------------------------
         # Direction
         #
@@ -612,7 +600,6 @@ class MavlinkBridgeNode(Node):
 
         if step not in (-1, 1):
             return
-
 
         # ---------------------------------------------------------
         # Current mode
@@ -631,13 +618,11 @@ class MavlinkBridgeNode(Node):
             )
             return
 
-
         current_index = mode_names.index(
             self.mode
         )
 
         new_index = current_index + step
-
 
         # ---------------------------------------------------------
         # Do not wrap around
@@ -657,13 +642,11 @@ class MavlinkBridgeNode(Node):
             )
             return
 
-
         requested_mode, custom_mode = (
             self.mode_sequence[new_index]
         )
         if self.guided.monitor:
             self.guided.stop('Selector del mando: cancelación de secuencia', requested_mode)
-
 
         # ---------------------------------------------------------
         # Send mode change to ArduSub
@@ -687,8 +670,6 @@ class MavlinkBridgeNode(Node):
             self.get_logger().error(
                 f'Failed to send mode change: {exc}'
             )
-
-
 
     def arm_request_callback(self, msg):
 
@@ -743,7 +724,6 @@ class MavlinkBridgeNode(Node):
 
         self.send_arm_disarm(True)
 
-
     def disarm_request_callback(self, msg):
 
         if not self.enable_arm_disarm:
@@ -764,7 +744,6 @@ class MavlinkBridgeNode(Node):
 
         self.guided.stop('Desarmado solicitado por el mando')
         self.send_arm_disarm(False)
-
 
     def send_arm_disarm(self, arm):
 
@@ -871,7 +850,6 @@ class MavlinkBridgeNode(Node):
             )
 
         self.last_camera_command_time = None
-
 
     def lights_step_callback(self, msg):
 
@@ -1182,7 +1160,6 @@ class MavlinkBridgeNode(Node):
 
             self.last_armed_state = self.armed
 
-
         # =========================================================
         # Resolve ArduSub mode from MAVLink custom_mode
         # =========================================================
@@ -1193,7 +1170,6 @@ class MavlinkBridgeNode(Node):
             custom_mode,
             mavutil.mode_string_v10(msg)
         )
-
 
         armed_msg = Bool()
         armed_msg.data = self.armed
@@ -1206,7 +1182,7 @@ class MavlinkBridgeNode(Node):
         mode_msg.data = self.mode
 
         self.mode_pub.publish(
-        mode_msg
+            mode_msg
         )
 
     # =============================================================
@@ -1235,8 +1211,6 @@ class MavlinkBridgeNode(Node):
 
             # Motor power hysteresis
 
-
-
             if (
                 voltage_value
                 >= self.motor_power_on_threshold
@@ -1250,9 +1224,6 @@ class MavlinkBridgeNode(Node):
             ):
 
                 self.motors_enabled = False
-
-
-
 
             motors_msg = Bool()
             motors_msg.data = (

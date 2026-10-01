@@ -7,7 +7,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from uuv_mavlink.sequence_core import Limits, Pose, Sequence, parse_steps, return_steps
+from uuv_mavlink.sequence_core import Limits, parse_steps, Pose, return_steps, Sequence
 
 
 class String:
@@ -55,8 +55,15 @@ fake_node = types.ModuleType('rclpy.node')
 fake_node.Node = FakeNode
 fake_std = types.ModuleType('std_msgs.msg')
 fake_std.String = String
-with patch.dict(sys.modules, {'rclpy': fake_ros, 'rclpy.node': fake_node,
-                              'std_msgs': types.ModuleType('std_msgs'), 'std_msgs.msg': fake_std}):
+with patch.dict(
+    sys.modules,
+    {
+        'rclpy': fake_ros,
+        'rclpy.node': fake_node,
+        'std_msgs': types.ModuleType('std_msgs'),
+        'std_msgs.msg': fake_std,
+    },
+):
     from uuv_mavlink.guided_bridge import GuidedBridge
     from uuv_mavlink.sequence_executor_node import SequenceExecutor
 
@@ -72,7 +79,12 @@ class Mav:
 class FakeBridge(FakeNode):
     def __init__(self, enabled=True):
         super().__init__()
-        self.parameters.update(sequence_monitor_enabled=True, enable_sequence_output=enabled, dvl_rest_base_url='')
+        self.parameters.update(
+            sequence_monitor_enabled=True,
+            enable_sequence_output=enabled,
+            dvl_rest_base_url='',
+            dvl_tcp_host='',
+        )
         self.enable_command_output = enabled
         self.require_manual_mode = True
         self.connected = True
@@ -112,7 +124,13 @@ class TestSequenceCore(unittest.TestCase):
         self.assertEqual(core.goal.n, 2)
 
     def test_invalid_inputs_and_limits(self):
-        for steps in ([], [('turn', 360)], [('wait', -1)], [('advance', math.nan)], [('depth', True)]):
+        for steps in (
+            [],
+            [('turn', 360)],
+            [('wait', -1)],
+            [('advance', math.nan)],
+            [('depth', True)],
+        ):
             with self.assertRaises(ValueError):
                 parse_steps(steps)
         core = Sequence()
@@ -130,7 +148,7 @@ class TestSequenceCore(unittest.TestCase):
             if core.state != 'RUNNING':
                 break
             vn, ve, vd, yaw = cmd
-            speed = math.sqrt(vn*vn + ve*ve + vd*vd)
+            speed = math.sqrt(vn * vn + ve * ve + vd * vd)
             self.assertLessEqual(math.hypot(vn, ve), 0.200001)
             self.assertLessEqual(abs(vd), 0.100001)
             pose = Pose(pose.n + vn * 0.05, pose.e + ve * 0.05, pose.depth + vd * 0.05, yaw)
@@ -165,6 +183,19 @@ class TestSequenceCore(unittest.TestCase):
             core.update(pose, i * 0.05)
         self.assertEqual(core.state, 'CANCELLED')
 
+    def test_hold_freezes_step_timeout_and_resets_dwell(self):
+        core = Sequence(Limits(step_timeout=1))
+        pose = Pose(0, 0, 0, 0)
+        core.start(pose, [('wait', 0.5)], 0)
+        core.update(pose, 0.2)
+        self.assertEqual(core.inside_since, 0.2)
+        core.hold(0.9)
+        self.assertAlmostEqual(core.started, 0.7)
+        self.assertIsNone(core.inside_since)
+        command = core.update(pose, 0.95)
+        self.assertIsNotNone(command)
+        self.assertEqual(core.state, 'RUNNING')
+
     def test_home_has_fixed_endpoint_despite_heading_error(self):
         home = Pose(0, 0, 0.5, math.radians(-179))
         start = Pose(1, 1, 0.5, math.radians(179))
@@ -173,6 +204,44 @@ class TestSequenceCore(unittest.TestCase):
         core.index = 2
         core.begin_step(Pose(1.05, 1.03, 0.51, -2.3), 1)
         self.assertEqual((core.goal.n, core.goal.e, core.goal.depth), (0, 0, 0.5))
+
+    def test_mixed_position_and_timed_velocity_queue(self):
+        core = Sequence(Limits(max_depth=3, radius=5))
+        pose = Pose(0, 0, 0.2, 0)
+        steps = [
+            {'kind': 'lateral', 'value': 0.5, 'speed': 0.15},
+            {'kind': 'velocity_surge', 'speed': 0.10, 'duration': 1.0},
+            {'kind': 'velocity_yaw', 'speed': math.radians(5), 'duration': 1.0},
+        ]
+        core.start(pose, steps, 0)
+        self.assertAlmostEqual(core.goal.e, 0.5)
+        core.index = 1
+        core.begin_step(pose, 1.0)
+        core.last_time = 1.0
+        command = core.update(None, 1.05)
+        self.assertAlmostEqual(command[0], 0.10)
+        self.assertAlmostEqual(command[1], 0.0)
+        self.assertEqual(core.state, 'RUNNING')
+
+    def test_timed_velocity_limits_are_enforced(self):
+        for steps in (
+            [{'kind': 'velocity_surge', 'speed': 0.21, 'duration': 1}],
+            [{'kind': 'velocity_heave', 'speed': 0.11, 'duration': 1}],
+            [{'kind': 'velocity_yaw', 'speed': math.radians(11), 'duration': 1}],
+            [{'kind': 'velocity_surge', 'speed': 0.1, 'duration': 31}],
+        ):
+            with self.assertRaises(ValueError):
+                Sequence().validate(Pose(0, 0, 0, 0), steps)
+
+    def test_operator_can_raise_motion_limits(self):
+        limits = Limits(horizontal_speed=0.8, vertical_speed=0.4, yaw_speed=math.radians(45))
+        steps = [
+            {'kind': 'velocity_surge', 'speed': 0.7, 'duration': 1},
+            {'kind': 'velocity_heave', 'speed': -0.3, 'duration': 1},
+            {'kind': 'velocity_yaw', 'speed': math.radians(40), 'duration': 1},
+        ]
+        parsed = Sequence(limits).validate(Pose(0, 0, 0, 0), steps)
+        self.assertEqual(parsed, steps)
 
 
 class TestGuidedTransport(unittest.TestCase):
@@ -189,18 +258,52 @@ class TestGuidedTransport(unittest.TestCase):
     def refresh(self):
         self.b.last_heartbeat_time = self.now
         self.b.last_cmd_time = self.now
-        for key, value in dict(position=[0, 0, 0], velocity=[0, 0, 0], yaw=0,
-                               pressure=1000, ekf=47, dvl=90, voltage=16).items():
+        for key, value in {
+            'position': [0, 0, 0],
+            'velocity': [0, 0, 0],
+            'yaw': 0,
+            'pressure': 1000,
+            'ekf': 47,
+            'dvl': 90,
+            'voltage': 16,
+        }.items():
             self.g.put(key, value)
         self.g.version = [4, 5, 7]
-        self.g.params = {k: (v, self.now) for k, v in dict(FS_PILOT_INPUT=2, FS_PILOT_TIMEOUT=3, SYSID_MYGCS=255).items()}
+        self.g.params = {
+            k: (v, self.now)
+            for k, v in {'FS_PILOT_INPUT': 2, 'FS_PILOT_TIMEOUT': 3, 'SYSID_MYGCS': 255}.items()
+        }
 
     def command(self, **overrides):
         status = json.loads(self.g.status_pub.messages[-1])
-        packet = dict(session=status['session'], permit=status['permit'], ticket=status['ticket'],
-                      run='run1', serial=0, command=[0.1, 0, 0, 0])
+        packet = {
+            'session': status['session'],
+            'permit': status['permit'],
+            'ticket': status['ticket'],
+            'run': 'run1',
+            'serial': 0,
+            'command': [0.1, 0, 0, 0],
+            'limits': {
+                'horizontal_speed': 0.2,
+                'vertical_speed': 0.1,
+                'yaw_speed': math.radians(10),
+            },
+        }
         packet.update(overrides)
         return String(json.dumps(packet))
+
+    def action(self, action):
+        status = json.loads(self.g.status_pub.messages[-1])
+        return String(
+            json.dumps(
+                {
+                    'session': status['session'],
+                    'permit': status['permit'],
+                    'ticket': status['ticket'],
+                    'action': action,
+                }
+            )
+        )
 
     def test_disabled_output_never_sends_motion_arm_or_modes(self):
         b = FakeBridge(enabled=False)
@@ -216,9 +319,205 @@ class TestGuidedTransport(unittest.TestCase):
     def test_velocity_frame_mask_and_values(self):
         self.g.receive(self.command())
         self.g.tick()
-        packets = [a for n, a in self.b.master.mav.sent if n == 'set_position_target_local_ned_send']
+        packets = [
+            a for n, a in self.b.master.mav.sent if n == 'set_position_target_local_ned_send'
+        ]
         self.assertEqual(packets[-1][1:5], (1, 1, 1, 2503))
         self.assertEqual(packets[-1][8:11], (0.1, 0.0, 0.0))
+
+    def test_guided_entry_streams_and_keeps_pose_latched_in_manual(self):
+        self.b.mode = 'MANUAL'
+        self.g.tick()
+        self.g.put('position', [1.2, -0.4, 0.7])
+        self.g.put('yaw', 0.3)
+        self.g.tick()
+        before = len(
+            [1 for n, _ in self.b.master.mav.sent if n == 'set_position_target_local_ned_send']
+        )
+        self.g.action(self.action('guided'))
+        self.assertEqual(self.g.hold_target, (1.2, -0.4, 0.7, 0.3))
+        after = len(
+            [1 for n, _ in self.b.master.mav.sent if n == 'set_position_target_local_ned_send']
+        )
+        self.assertEqual(after, before + 2)
+        self.assertEqual(
+            [name for name, _ in self.b.master.mav.sent[-3:]],
+            [
+                'set_mode_send',
+                'set_position_target_local_ned_send',
+                'set_position_target_local_ned_send',
+            ],
+        )
+        mode_packets = [a for n, a in self.b.master.mav.sent if n == 'set_mode_send']
+        self.assertEqual(mode_packets[-1], (1, 1, 4))
+
+        self.g.tick()
+        repeated = len(
+            [1 for n, _ in self.b.master.mav.sent if n == 'set_position_target_local_ned_send']
+        )
+        self.assertEqual(repeated, after + 2)
+
+        self.g.put('position', [1.25, -0.45, 0.72])
+        self.g.put('velocity', [0, 0, 0])
+        self.g.put('yaw', 0.32)
+        self.b.mode = 'GUIDED'
+        self.g.tick()
+        packets = [
+            a for n, a in self.b.master.mav.sent if n == 'set_position_target_local_ned_send'
+        ]
+        self.assertEqual(packets[-2][1:5], (1, 1, 1, 1479))
+        self.assertEqual(packets[-2][8:11], (0.0, 0.0, 0.0))
+        self.assertEqual(packets[-1][1:5], (1, 1, 1, 2552))
+        self.assertEqual(packets[-1][5:8], (1.2, -0.4, 0.7))
+        self.assertEqual(packets[-1][8:14], (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertAlmostEqual(packets[-1][14], 0.3)
+        self.assertIn('Estabilizando entrada a GUIDED', self.g.output_reasons())
+
+        self.now += 5.01
+        self.refresh()
+        self.g.put('position', [1.2, -0.4, 0.7])
+        self.g.put('velocity', [0, 0, 0])
+        self.g.put('yaw', 0.3)
+        self.g.tick()
+        self.assertNotIn('Estabilizando entrada a GUIDED', self.g.output_reasons())
+        self.assertIn('listo para iniciar', self.g.last_reason)
+
+    def test_second_guided_entry_never_reuses_first_hold_target(self):
+        self.b.mode = 'MANUAL'
+        self.g.tick()
+        self.g.put('position', [1, 2, 0.3])
+        self.g.put('yaw', 0.1)
+        self.g.tick()
+        self.g.action(self.action('guided'))
+        self.assertEqual(self.g.hold_target, (1, 2, 0.3, 0.1))
+        self.b.mode = 'GUIDED'
+        self.g.put('position', [1.1, 2.1, 0.31])
+        self.g.put('velocity', [0, 0, 0])
+        self.g.put('yaw', 0.11)
+        self.g.tick()
+        self.assertEqual(self.g.hold_target, (1, 2, 0.3, 0.1))
+
+        self.b.mode = 'MANUAL'
+        self.g.tick()
+        self.g.put('position', [4, 5, 0.6])
+        self.g.put('velocity', [0, 0, 0])
+        self.g.put('yaw', 0.4)
+        self.g.tick()
+        before = len(
+            [1 for n, _ in self.b.master.mav.sent if n == 'set_position_target_local_ned_send']
+        )
+        self.g.action(self.action('guided'))
+        self.assertEqual(
+            len(
+                [1 for n, _ in self.b.master.mav.sent if n == 'set_position_target_local_ned_send']
+            ),
+            before + 2,
+        )
+        self.b.mode = 'GUIDED'
+        self.g.put('position', [4.1, 5.1, 0.62])
+        self.g.put('velocity', [0, 0, 0])
+        self.g.put('yaw', 0.42)
+        self.g.tick()
+        self.assertEqual(self.g.hold_target, (4, 5, 0.6, 0.4))
+        packets = [
+            a for n, a in self.b.master.mav.sent if n == 'set_position_target_local_ned_send'
+        ]
+        self.assertEqual(packets[-1][5:8], (4, 5, 0.6))
+
+    def test_guided_entry_rejects_vehicle_already_moving(self):
+        self.b.mode = 'MANUAL'
+        self.g.tick()
+        for velocity, text in [([0.11, 0, 0], 'horizontal'), ([0, 0, -0.11], 'vertical')]:
+            self.g.put('velocity', velocity)
+            before = len([1 for name, _ in self.b.master.mav.sent if name == 'set_mode_send'])
+            self.g.action(self.action('guided'))
+            after = len([1 for name, _ in self.b.master.mav.sent if name == 'set_mode_send'])
+            self.assertEqual(after, before)
+            self.assertIn('movimiento ' + text, self.g.last_reason)
+            self.g.tick()
+
+    def test_guided_entry_vertical_transient_returns_to_manual(self):
+        self.b.mode = 'MANUAL'
+        self.g.tick()
+        self.g.action(self.action('guided'))
+        self.b.mode = 'GUIDED'
+        self.g.tick()
+        self.g.put('position', [0, 0, 0.02])
+        self.g.put('velocity', [0, 0, 0.16])
+        self.g.tick()
+        self.assertEqual(self.g.abort_mode, 'MANUAL')
+        self.assertIn('Velocidad vertical', self.g.last_reason)
+        mode_packets = [a for n, a in self.b.master.mav.sent if n == 'set_mode_send']
+        self.assertEqual(mode_packets[-1], (1, 1, 19))
+
+    def test_delayed_guided_drift_is_guarded_after_settling(self):
+        self.b.mode = 'MANUAL'
+        self.g.tick()
+        self.g.action(self.action('guided'))
+        self.b.mode = 'GUIDED'
+        self.g.tick()
+
+        self.now += 5.01
+        self.refresh()
+        self.g.tick()
+        self.assertIsNone(self.g.guided_settle_started)
+        self.assertIsNotNone(self.g.guided_entry_reference)
+        self.assertIn('listo para iniciar', self.g.last_reason)
+
+        self.g.put('position', [0, 0, 0.081])
+        self.g.put('velocity', [0, 0, 0.01])
+        self.g.tick()
+        self.assertEqual(self.g.abort_mode, 'MANUAL')
+        self.assertIn('Desviación vertical', self.g.last_reason)
+
+    def test_guided_entry_guards_horizontal_position_speed_and_yaw(self):
+        cases = [
+            ([0.101, 0, 0], [0, 0, 0], 0, 'Desviación horizontal'),
+            ([0, 0, 0], [0.151, 0, 0], 0, 'Velocidad horizontal'),
+            ([0, 0, 0], [0, 0, 0], math.radians(5.1), 'Desviación de rumbo'),
+        ]
+        for position, velocity, yaw, text in cases:
+            self.g.guided_entry_reference = (0, 0, 0, 0)
+            self.g.put('position', position)
+            self.g.put('velocity', velocity)
+            self.g.put('yaw', yaw)
+            self.assertIn(text, self.g.guided_entry_fault())
+
+    def test_external_second_guided_entry_recaptures_instead_of_reusing(self):
+        self.g.hold_target = (9, 9, 9, 0.9)
+        self.b.mode = 'MANUAL'
+        self.g.tick()
+        self.g.put('position', [2, 3, 0.4])
+        self.g.put('velocity', [0, 0, 0])
+        self.g.put('yaw', 0.2)
+        self.b.mode = 'GUIDED'
+        self.g.tick()
+        self.assertEqual(self.g.hold_target, (2, 3, 0.4, 0.2))
+        packets = [
+            a for n, a in self.b.master.mav.sent if n == 'set_position_target_local_ned_send'
+        ]
+        self.assertEqual(packets[-1][5:8], (2, 3, 0.4))
+
+    def test_unconfirmed_guided_request_expires_without_stale_target(self):
+        self.b.mode = 'MANUAL'
+        self.g.tick()
+        self.g.action(self.action('guided'))
+        self.assertIsNotNone(self.g.guided_request_at)
+        self.now += 2.01
+        self.refresh()
+        self.g.tick()
+        self.assertIsNone(self.g.guided_request_at)
+        self.assertIsNone(self.g.hold_target)
+        self.assertIn('no confirmado', self.g.last_reason)
+
+    def test_guided_entry_without_pose_is_rejected(self):
+        self.b.mode = 'MANUAL'
+        self.g.tick()
+        self.g.samples.pop('position', None)
+        self.g.action(self.action('guided'))
+        mode_packets = [a for n, a in self.b.master.mav.sent if n == 'set_mode_send']
+        self.assertEqual(mode_packets, [])
+        self.assertIn('posición o rumbo no disponibles', self.g.last_reason)
 
     def test_dead_executor_stops_and_old_packet_cannot_restart(self):
         old = self.command()
@@ -230,7 +529,9 @@ class TestGuidedTransport(unittest.TestCase):
         self.assertIsNotNone(self.g.abort_mode)
         self.g.receive(old)
         self.assertIsNone(self.g.owner)
-        packets = [a for n, a in self.b.master.mav.sent if n == 'set_position_target_local_ned_send']
+        packets = [
+            a for n, a in self.b.master.mav.sent if n == 'set_position_target_local_ned_send'
+        ]
         self.assertEqual(packets[-1][8:11], (0.0, 0.0, 0.0))
 
     def test_only_one_run_and_increasing_serial(self):
@@ -241,15 +542,16 @@ class TestGuidedTransport(unittest.TestCase):
         self.g.receive(self.command(serial=0, command=[0.2, 0, 0, 0]))
         self.assertEqual(self.g.last_command[0], 0.1)
 
-    def test_stale_telemetry_dvl_and_manual_takeover(self):
-        for missing in ('position', 'pressure', 'dvl', 'ekf'):
+    def test_sensor_diagnostics_do_not_take_motion_authority(self):
+        for missing in ('position', 'pressure', 'ekf'):
             self.refresh()
             self.g.abort_mode = None
             self.g.tick()
             self.g.receive(self.command())
             del self.g.samples[missing]
             self.g.tick()
-            self.assertIsNone(self.g.owner, missing)
+            self.assertEqual(self.g.owner, 'run1', missing)
+            self.g.stop('fin de caso')
         self.refresh()
         self.g.abort_mode = None
         self.g.tick()
@@ -258,6 +560,54 @@ class TestGuidedTransport(unittest.TestCase):
         self.g.tick()
         self.assertIsNone(self.g.owner)
         self.assertEqual(self.g.abort_mode, 'MANUAL')
+
+    def test_short_dvl_loss_is_diagnostic_and_command_continues(self):
+        self.g.receive(self.command())
+        del self.g.samples['dvl']
+        self.g.tick()
+        self.assertEqual(self.g.owner, 'run1')
+        packets = [
+            a for n, a in self.b.master.mav.sent if n == 'set_position_target_local_ned_send'
+        ]
+        self.assertEqual(packets[-1][8:11], (0.1, 0.0, 0.0))
+        status = json.loads(self.g.status_pub.messages[-1])
+        self.assertIn('Sin datos recientes: dvl', status['diagnostics'])
+        self.assertNotIn('Sin datos recientes: dvl', status['blockers'])
+
+    def test_normal_mavlink_jitter_does_not_pause_transport(self):
+        self.g.receive(self.command())
+        for key in ('position', 'velocity', 'yaw', 'pressure', 'ekf'):
+            value, _ = self.g.samples[key]
+            self.g.samples[key] = (value, self.now - 0.9)
+        self.assertEqual(self.g.health(), [])
+        self.g.receive(self.command(serial=1, command=[0, 0, 0, 0]))
+        self.g.tick()
+        self.assertEqual(self.g.owner, 'run1')
+
+    def test_dvl_loss_never_times_out_or_rejects_motion(self):
+        self.g.receive(self.command())
+        del self.g.samples['dvl']
+        self.g.tick()
+        for serial in range(1, 17):
+            self.now += 0.20
+            self.refresh()
+            del self.g.samples['dvl']
+            self.g.receive(self.command(serial=serial, command=[0.1, 0, 0, 0]))
+            self.g.tick()
+        self.assertEqual(self.g.owner, 'run1')
+
+    def test_direct_invalid_dvl_and_related_ekf_are_diagnostics(self):
+        self.g.receive(self.command())
+        self.g.dvl_tcp_seen = True
+        self.g.dvl_tcp_valid = False
+        self.g.dvl_tcp_at = self.now
+        self.g.put('ekf', 1)
+        self.g.tick()
+        self.assertEqual(self.g.owner, 'run1')
+
+        self.g.put('pressure', 2000)
+        self.g.tick()
+        self.assertIsNone(self.g.owner)
 
     def test_real_manual_mode_cancels_and_never_restarts(self):
         old = self.command()
@@ -279,9 +629,25 @@ class TestGuidedTransport(unittest.TestCase):
         self.g.receive(self.command())
         self.assertIsNone(self.g.owner)
 
+    def test_bridge_accepts_configured_speed_and_locks_run_limits(self):
+        limits = {'horizontal_speed': 0.6, 'vertical_speed': 0.3, 'yaw_speed': math.radians(30)}
+        self.g.receive(self.command(command=[0.5, 0, 0, 0], limits=limits))
+        self.assertEqual(self.g.owner, 'run1')
+        self.assertAlmostEqual(self.g.last_command[0], 0.5)
+        self.g.receive(self.command(serial=1, command=[0.61, 0, 0, 0], limits=limits))
+        self.assertIsNone(self.g.owner)
+
     def test_duplicate_sensor_time_does_not_refresh_cached_data(self):
-        packet = Packet(kind='VISION_POSITION_DELTA', sysid=255, compid=0, confidence=90,
-                        position_delta=[0, 0, 0], angle_delta=[0, 0, 0], time_usec=100000, time_delta_usec=100000)
+        packet = Packet(
+            kind='VISION_POSITION_DELTA',
+            sysid=255,
+            compid=0,
+            confidence=90,
+            position_delta=[0, 0, 0],
+            angle_delta=[0, 0, 0],
+            time_usec=100000,
+            time_delta_usec=100000,
+        )
         self.g.observe(packet)
         self.now += 0.9
         self.g.observe(packet)
@@ -296,11 +662,17 @@ class TestGuidedTransport(unittest.TestCase):
         self.g.put('yaw', 0, 1)
         self.assertGreater(self.g.nav_epoch, epoch)
 
-
     def test_zero_dvl_timestamp_refreshes_arrival_and_expires_on_silence(self):
-        packet = Packet(kind='VISION_POSITION_DELTA', sysid=255, compid=0,
-                        confidence=99.7, position_delta=[0.0001, 0, 0],
-                        angle_delta=[0, 0, 0], time_usec=0, time_delta_usec=78440)
+        packet = Packet(
+            kind='VISION_POSITION_DELTA',
+            sysid=255,
+            compid=0,
+            confidence=99.7,
+            position_delta=[0.0001, 0, 0],
+            angle_delta=[0, 0, 0],
+            time_usec=0,
+            time_delta_usec=78440,
+        )
         epoch = self.g.nav_epoch
         # Identical deltas can legitimately occur while the ROV is stationary.
         for _ in range(25):
@@ -308,28 +680,46 @@ class TestGuidedTransport(unittest.TestCase):
             self.g.observe(packet)
             self.assertEqual(self.g.get('dvl'), 99.7)
         self.assertEqual(self.g.nav_epoch, epoch)
-        self.now += 0.79
-        self.assertEqual(self.g.get('dvl'), 99.7)
+        self.now += 1.49
+        self.assertEqual(self.g.get('dvl', 1.5), 99.7)
         self.now += 0.02
-        self.assertIsNone(self.g.get('dvl'))
+        self.assertIsNone(self.g.get('dvl', 1.5))
         self.assertIn('Sin datos recientes: dvl', self.g.health())
 
     def test_zero_timestamp_still_requires_correct_source_and_valid_fields(self):
         self.g.samples.pop('dvl')
-        fields = dict(kind='VISION_POSITION_DELTA', sysid=255, compid=0,
-                      confidence=99.7, position_delta=[0, 0, 0],
-                      angle_delta=[0, 0, 0], time_usec=0, time_delta_usec=75000)
-        for change in ({'sysid': 99}, {'compid': 1}, {'confidence': float('nan')},
-                       {'time_delta_usec': 0}, {'time_usec': -1}):
+        fields = {
+            'kind': 'VISION_POSITION_DELTA',
+            'sysid': 255,
+            'compid': 0,
+            'confidence': 99.7,
+            'position_delta': [0, 0, 0],
+            'angle_delta': [0, 0, 0],
+            'time_usec': 0,
+            'time_delta_usec': 75000,
+        }
+        for change in (
+            {'sysid': 99},
+            {'compid': 1},
+            {'confidence': float('nan')},
+            {'time_delta_usec': 0},
+            {'time_usec': -1},
+        ):
             self.g.observe(Packet(**dict(fields, **change)))
             self.assertIsNone(self.g.get('dvl'), change)
         self.g.observe(Packet(**dict(fields, confidence=20)))
         self.assertIn('Confianza del mensaje DVL insuficiente', self.g.health())
 
     def test_positive_dvl_timestamp_checks_survive_zero_timestamp_packets(self):
-        fields = dict(kind='VISION_POSITION_DELTA', sysid=255, compid=0,
-                      confidence=90, position_delta=[0, 0, 0],
-                      angle_delta=[0, 0, 0], time_delta_usec=75000)
+        fields = {
+            'kind': 'VISION_POSITION_DELTA',
+            'sysid': 255,
+            'compid': 0,
+            'confidence': 90,
+            'position_delta': [0, 0, 0],
+            'angle_delta': [0, 0, 0],
+            'time_delta_usec': 75000,
+        }
         self.g.observe(Packet(**fields, time_usec=100000))
         self.now += 0.1
         self.g.observe(Packet(**fields, time_usec=0))
@@ -340,17 +730,26 @@ class TestGuidedTransport(unittest.TestCase):
         self.assertEqual(self.g.get('dvl'), 90)
         epoch = self.g.nav_epoch
         self.g.observe(Packet(**fields, time_usec=1))
-        self.assertGreater(self.g.nav_epoch, epoch)
+        self.assertEqual(self.g.nav_epoch, epoch)
+        self.assertIsNone(self.g.get('dvl'))
 
     @staticmethod
     def rest_dvl(counter, confidence=99.7, updated=None, **changes):
-        message = dict(type='VISION_POSITION_DELTA', confidence=confidence,
-                       position_delta=[0.0001, 0, 0], angle_delta=[0, 0, 0],
-                       time_delta_usec=80000, time_usec=0)
+        message = {
+            'type': 'VISION_POSITION_DELTA',
+            'confidence': confidence,
+            'position_delta': [0.0001, 0, 0],
+            'angle_delta': [0, 0, 0],
+            'time_delta_usec': 80000,
+            'time_usec': 0,
+        }
         message.update(changes)
-        return {'message': message,
-                'status': {'time': {'counter': counter,
-                                    'last_update': updated or f'update-{counter}'}}}
+        return {
+            'message': message,
+            'status': {
+                'time': {'counter': counter, 'last_update': updated or f'update-{counter}'}
+            },
+        }
 
     def test_rest_dvl_needs_advancing_counter_and_expires(self):
         self.g.samples.pop('dvl')
@@ -376,7 +775,7 @@ class TestGuidedTransport(unittest.TestCase):
         self.assertEqual(self.g.get('dvl'), 99.7)
         epoch = self.g.nav_epoch
         self.g.observe_rest_dvl(self.rest_dvl(1))
-        self.assertGreater(self.g.nav_epoch, epoch)
+        self.assertEqual(self.g.nav_epoch, epoch)
         self.assertIsNone(self.g.get('dvl'))
         self.g.observe_rest_dvl(self.rest_dvl(2))
         self.assertEqual(self.g.get('dvl'), 99.7)
@@ -391,10 +790,25 @@ class TestExecutor(unittest.TestCase):
         self.ex = SequenceExecutor()
         self.ui_counter = 0
         self.action_counter = 0
-        self.f = dict(session='bridge', nav_epoch=0, permit='permit', ticket='bridge-ticket',
-                      samples=dict(position=[0, 0, 0], velocity=[0, 0, 0], pressure=1000, yaw=0, dvl=90),
-                      health=[], blockers=['Salida real deshabilitada'], mode='MANUAL', armed=False,
-                      enabled=False, reason='test')
+        self.f = {
+            'session': 'bridge',
+            'nav_epoch': 0,
+            'permit': 'permit',
+            'ticket': 'bridge-ticket',
+            'samples': {
+                'position': [0, 0, 0],
+                'velocity': [0, 0, 0],
+                'pressure': 1000,
+                'yaw': 0,
+                'dvl': 90,
+            },
+            'health': [],
+            'blockers': ['Salida real deshabilitada'],
+            'mode': 'MANUAL',
+            'armed': False,
+            'enabled': False,
+            'reason': 'test',
+        }
         for _ in range(45):
             self.advance()
 
@@ -405,16 +819,38 @@ class TestExecutor(unittest.TestCase):
 
     def req(self, action, **extra):
         s = json.loads(self.ex.state_pub.messages[-1])
-        packet = dict(session=s['session'], ticket=s['ticket'], ui='ui', serial=self.action_counter,
-                      action=action, sensor_depth=0.2, limits_confirmed=True, max_depth=1, radius=2,
-                      steps=[['advance', 0.5]])
+        packet = {
+            'session': s['session'],
+            'ticket': s['ticket'],
+            'ui': 'ui',
+            'serial': self.action_counter,
+            'action': action,
+            'sensor_depth': 0.2,
+            'max_depth': 1,
+            'radius': 2,
+            'max_horizontal_speed': 0.2,
+            'max_vertical_speed': 0.1,
+            'max_yaw_speed_deg': 10,
+            'steps': [['advance', 0.5]],
+        }
         self.action_counter += 1
         packet.update(extra)
         self.ex.on_request(String(json.dumps(packet)))
 
     def ui(self):
         s = json.loads(self.ex.state_pub.messages[-1])
-        self.ex.on_ui(String(json.dumps(dict(session=s['session'], ticket=s['ticket'], ui='ui', serial=self.ui_counter))))
+        self.ex.on_ui(
+            String(
+                json.dumps(
+                    {
+                        'session': s['session'],
+                        'ticket': s['ticket'],
+                        'ui': 'ui',
+                        'serial': self.ui_counter,
+                    }
+                )
+            )
+        )
         self.ui_counter += 1
 
     def start(self):
@@ -435,6 +871,70 @@ class TestExecutor(unittest.TestCase):
         self.req('execute')
         self.assertNotEqual(self.ex.core.state, 'RUNNING')
         self.assertEqual(self.ex.command_pub.messages, [])
+
+    def test_prepare_transaction_does_not_arm_or_move(self):
+        self.req('prepare', sensor_depth=0.15, max_depth=0.2, radius=0.5, steps=[['wait', 3]])
+        self.assertIsNotNone(self.ex.reference, self.ex.note)
+        self.assertIsNotNone(self.ex.home)
+        self.assertIsNotNone(self.ex.validated)
+        self.assertEqual(self.ex.core.limits.max_depth, 0.2)
+        self.assertEqual(self.ex.core.limits.horizontal_speed, 0.2)
+        self.assertEqual(self.ex.prepared_by, ['ui', 0])
+        self.assertEqual(self.ex.command_pub.messages, [])
+        self.assertEqual(self.ex.action_pub.messages, [])
+
+    def test_prepare_accepts_operator_motion_limits(self):
+        self.req(
+            'prepare',
+            max_horizontal_speed=0.8,
+            max_vertical_speed=0.4,
+            max_yaw_speed_deg=45,
+            steps=[{'kind': 'velocity_surge', 'speed': 0.7, 'duration': 1}],
+        )
+        self.assertIsNotNone(self.ex.validated, self.ex.note)
+        self.assertAlmostEqual(self.ex.core.limits.horizontal_speed, 0.8)
+        self.assertAlmostEqual(self.ex.core.limits.vertical_speed, 0.4)
+        self.assertAlmostEqual(self.ex.core.limits.yaw_speed, math.radians(45))
+
+    def test_prepare_rejects_armed_mode_and_hard_health_fault(self):
+        for changes in (
+            {'armed': True},
+            {'mode': 'GUIDED'},
+            {'health': ['Sin heartbeat reciente']},
+        ):
+            old = dict(self.f)
+            self.f.update(changes)
+            self.advance()
+            self.req('prepare')
+            self.assertIsNone(self.ex.validated, changes)
+            self.f = old
+            for _ in range(45):
+                self.advance()
+        self.req('prepare')
+        self.assertIsNotNone(self.ex.validated)
+
+    def test_failed_prepare_clears_previous_plan_and_references(self):
+        self.req('prepare')
+        self.assertIsNotNone(self.ex.validated)
+        self.req('prepare', steps=[['depth', 2]], max_depth=0.2)
+        self.assertIsNone(self.ex.validated)
+        self.assertIsNone(self.ex.reference)
+        self.assertIsNone(self.ex.home)
+        self.assertIsNone(self.ex.prepared_by)
+
+    def test_prepare_needs_stable_pressure_and_rejects_changed_limits(self):
+        self.ex.pressure_history.clear()
+        self.req('prepare')
+        self.assertIsNone(self.ex.validated)
+        for _ in range(45):
+            self.advance()
+        self.req('prepare')
+        self.assertIsNotNone(self.ex.validated, self.ex.note)
+        self.f.update(armed=True, mode='GUIDED', enabled=True, blockers=[])
+        self.advance()
+        self.ui()
+        self.req('execute', max_depth=2)
+        self.assertNotEqual(self.ex.core.state, 'RUNNING')
 
     def test_pressure_reference_depth_and_guard_against_ekf_reset(self):
         self.req('surface', sensor_depth=0.2)
@@ -465,14 +965,60 @@ class TestExecutor(unittest.TestCase):
         self.assertEqual(self.ex.core.state, 'CANCELLED')
         self.assertEqual(self.ex.core.steps, [])
 
-    def test_nav_loss_invalidates_surface_home_and_plan(self):
+    def test_hard_transport_loss_invalidates_surface_home_and_plan(self):
         self.start()
-        self.f['health'] = ['DVL sin datos']
+        self.f['health'] = ['Sin heartbeat reciente']
         self.advance()
         self.assertIsNone(self.ex.reference)
         self.assertIsNone(self.ex.home)
         self.assertIsNone(self.ex.validated)
         self.assertEqual(self.ex.core.state, 'CANCELLED')
+
+    def test_dvl_diagnostic_keeps_run_and_publishes_motion(self):
+        self.start()
+        self.ui()
+        self.advance()
+        self.f.update(
+            diagnostics=['DVL reporta velocidad inválida'],
+            paused=False,
+            dvl_velocity_valid=False,
+            dvl_altitude=0.2,
+        )
+        self.ui()
+        self.advance()
+        self.assertEqual(self.ex.core.state, 'RUNNING')
+        self.assertIsNotNone(self.ex.run)
+        command = json.loads(self.ex.command_pub.messages[-1])['command']
+        self.assertGreater(command[0], 0.0)
+        status = json.loads(self.ex.state_pub.messages[-1])
+        self.assertIn('DVL reporta velocidad inválida', status['diagnostics'])
+
+    def test_operator_phase_distinguishes_position_wait_and_timed_motion(self):
+        self.start()
+        self.ui()
+        self.advance()
+        status = json.loads(self.ex.state_pub.messages[-1])
+        self.assertEqual(status['phase']['code'], 'AVANCE')
+        self.assertEqual(status['current_step']['kind'], 'advance')
+
+        timed = Sequence()
+        pose = Pose(0, 0, 0.2, 0)
+        timed.start(pose, [{'kind': 'velocity_surge', 'speed': 0.1, 'duration': 3}], self.now)
+        self.ex.core = timed
+        self.ex.total = 1
+        phase = self.ex.phase_status(self.now + 0.05, None, 'posición no disponible')
+        self.assertEqual(phase['code'], 'TEMPORAL')
+        self.assertIn('continúa', phase['detail'])
+
+        core = Sequence()
+        core.start(pose, [('wait', 3)], self.now)
+        core.update(pose, self.now + 0.05)
+        self.ex.core = core
+        self.ex.total = 1
+        self.ex.feedback['paused'] = False
+        phase = self.ex.phase_status(self.now + 0.05, pose, '')
+        self.assertEqual(phase['code'], 'ESPERA')
+        self.assertGreater(phase['remaining_s'], 2.9)
 
     def test_edit_after_validation_and_duplicate_execute_are_rejected(self):
         self.req('surface')

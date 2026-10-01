@@ -1,11 +1,9 @@
 import time
 
+from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.node import Node
-
-from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool
-from std_msgs.msg import Int16MultiArray
+from std_msgs.msg import Bool, Int16MultiArray
 
 
 class ManualControlPreviewNode(Node):

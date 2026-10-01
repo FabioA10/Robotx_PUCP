@@ -4,12 +4,14 @@ from collections import deque
 import json
 import math
 from queue import Empty, Full, Queue
+import socket
 from threading import Event, Thread
 import time
-import uuid
 from urllib.request import urlopen
+import uuid
 
 from std_msgs.msg import String
+
 from .sequence_core import number
 
 
@@ -18,31 +20,52 @@ class GuidedBridge:
         self.b = bridge
         self.clock = clock
         defaults = {
-            'sequence_monitor_enabled': False, 'enable_sequence_output': False,
-            'dvl_source_system': 255, 'dvl_source_component': 0,
+            'sequence_monitor_enabled': False,
+            'enable_sequence_output': False,
+            'dvl_source_system': 255,
+            'dvl_source_component': 0,
             'dvl_min_confidence': 50.0,
             'dvl_rest_base_url': 'http://192.168.2.2/mavlink2rest/mavlink',
-            'dvl_rest_poll_period_s': 0.10,
-            'dvl_rest_timeout_s': 0.30,
+            'dvl_rest_poll_period_s': 0.50,
+            'dvl_rest_timeout_s': 0.80,
+            'dvl_tcp_host': '192.168.194.95',
+            'dvl_tcp_port': 16171,
+            'navigation_sample_timeout_s': 2.0,
+            'sequence_heartbeat_timeout_s': 2.0,
         }
         for name, value in defaults.items():
             bridge.declare_parameter(name, value)
         self.monitor = bool(bridge.get_parameter('sequence_monitor_enabled').value)
         self.enabled = bool(bridge.get_parameter('enable_sequence_output').value)
-        self.dvl_ids = (int(bridge.get_parameter('dvl_source_system').value),
-                        int(bridge.get_parameter('dvl_source_component').value))
+        self.dvl_ids = (
+            int(bridge.get_parameter('dvl_source_system').value),
+            int(bridge.get_parameter('dvl_source_component').value),
+        )
         self.min_confidence = float(bridge.get_parameter('dvl_min_confidence').value)
-        self.dvl_rest_base = str(
-            bridge.get_parameter('dvl_rest_base_url').value).rstrip('/')
-        self.dvl_rest_period = float(
-            bridge.get_parameter('dvl_rest_poll_period_s').value)
-        self.dvl_rest_timeout = float(
-            bridge.get_parameter('dvl_rest_timeout_s').value)
-        if self.dvl_rest_base and (not 0.05 <= self.dvl_rest_period <= 0.5
-                                   or not 0.05 <= self.dvl_rest_timeout <= 1.0):
+        self.dvl_rest_base = str(bridge.get_parameter('dvl_rest_base_url').value).rstrip('/')
+        self.dvl_rest_period = float(bridge.get_parameter('dvl_rest_poll_period_s').value)
+        self.dvl_rest_timeout = float(bridge.get_parameter('dvl_rest_timeout_s').value)
+        self.dvl_tcp_host = str(bridge.get_parameter('dvl_tcp_host').value).strip()
+        self.dvl_tcp_port = int(bridge.get_parameter('dvl_tcp_port').value)
+        self.navigation_sample_timeout = float(
+            bridge.get_parameter('navigation_sample_timeout_s').value
+        )
+        self.sequence_heartbeat_timeout = float(
+            bridge.get_parameter('sequence_heartbeat_timeout_s').value
+        )
+        if self.dvl_rest_base and (
+            not 0.05 <= self.dvl_rest_period <= 0.5 or not 0.05 <= self.dvl_rest_timeout <= 1.0
+        ):
             raise ValueError('Intervalos REST del DVL fuera de límites seguros')
-        if self.enabled and (not self.monitor or not bridge.enable_command_output
-                             or not bridge.require_manual_mode):
+        if self.dvl_tcp_host and not 1 <= self.dvl_tcp_port <= 65535:
+            raise ValueError('Puerto TCP del DVL fuera de rango')
+        if not 1.0 <= self.navigation_sample_timeout <= 2.5:
+            raise ValueError('Caducidad de telemetría fuera de límites seguros')
+        if not 1.5 <= self.sequence_heartbeat_timeout <= 3.0:
+            raise ValueError('Caducidad de heartbeat fuera de límites seguros')
+        if self.enabled and (
+            not self.monitor or not bridge.enable_command_output or not bridge.require_manual_mode
+        ):
             raise ValueError('GUIDED necesita monitor, salida manual y require_manual_mode=true')
         self.session = uuid.uuid4().hex
         self.nav_epoch = 0
@@ -55,16 +78,30 @@ class GuidedBridge:
         self.dvl_rest_queue = Queue(maxsize=1)
         self.dvl_rest_stop = Event()
         self.dvl_rest_thread = None
+        self.dvl_tcp_queue = Queue(maxsize=1)
+        self.dvl_tcp_stop = Event()
+        self.dvl_tcp_thread = None
+        self.dvl_tcp_seen = False
+        self.dvl_tcp_valid = None
+        self.dvl_tcp_at = 0.0
+        self.dvl_altitude = None
         self.version = None
         self.origin = None
         self.tokens = deque(maxlen=30)
         self.owner = None
+        self.owner_limits = None
         self.last_command = None
         self.last_command_at = 0.0
+        self.hold_target = None
+        self.guided_request_at = None
+        self.guided_settle_started = None
+        self.guided_entry_reference = None
         self.serial = -1
         self.mode_at_last_tick = None
         self.armed_at_last_tick = None
-        self.last_reason = 'Salida de secuencia deshabilitada' if not self.enabled else 'Esperando validación'
+        self.last_reason = (
+            'Salida de secuencia deshabilitada' if not self.enabled else 'Esperando validación'
+        )
         self.abort_mode = None
         self.abort_until = 0.0
         self.next_mode_request = 0.0
@@ -75,8 +112,14 @@ class GuidedBridge:
         self.timer = bridge.create_timer(0.05, self.tick)
         if self.monitor and self.dvl_rest_base:
             self.dvl_rest_thread = Thread(
-                target=self._dvl_rest_loop, name='uuv-dvl-rest', daemon=True)
+                target=self._dvl_rest_loop, name='uuv-dvl-rest', daemon=True
+            )
             self.dvl_rest_thread.start()
+        if self.monitor and self.dvl_tcp_host:
+            self.dvl_tcp_thread = Thread(
+                target=self._dvl_tcp_loop, name='uuv-dvl-tcp', daemon=True
+            )
+            self.dvl_tcp_thread.start()
 
     def put(self, key, value, source_time=None):
         now = self.clock()
@@ -84,7 +127,17 @@ class GuidedBridge:
             previous = self.source_times.get(key)
             if previous is not None and source_time <= previous:
                 if source_time < previous - 1000:
-                    self.reset_navigation('Reinicio o retroceso del reloj de telemetría')
+                    if key == 'dvl':
+                        # El DVL es diagnóstico. Un reinicio de su reloj no debe
+                        # retirar la autoridad de movimiento a ArduSub.
+                        self.samples.pop('dvl', None)
+                        self.source_times.pop('dvl', None)
+                        self.last_reason = (
+                            'DVL reiniciado; diagnóstico temporalmente no disponible'
+                        )
+                        return
+                    else:
+                        self.reset_navigation('Reinicio o retroceso del reloj de telemetría')
                 else:
                     return
             self.source_times[key] = source_time
@@ -96,6 +149,8 @@ class GuidedBridge:
         self.source_times.clear()
         self.params.clear()
         self.version = None
+        self.hold_target = None
+        self.clear_guided_entry()
         self.next_requests = 0.0
         self.stop(reason, fallback='MANUAL')
 
@@ -105,8 +160,15 @@ class GuidedBridge:
             return None
         return item[0]
 
-    def accept_dvl(self, confidence, position_delta, angle_delta,
-                   time_delta_usec, source_time=None, transport=None):
+    def accept_dvl(
+        self,
+        confidence,
+        position_delta,
+        angle_delta,
+        time_delta_usec,
+        source_time=None,
+        transport=None,
+    ):
         confidence = number(confidence)
         values = list(position_delta) + list(angle_delta)
         for value in values:
@@ -136,7 +198,12 @@ class GuidedBridge:
                 return
             counter = status['counter']
             updated = status['last_update']
-            if type(counter) is not int or counter < 0 or not isinstance(updated, str) or not updated:
+            if (
+                type(counter) is not int
+                or counter < 0
+                or not isinstance(updated, str)
+                or not updated
+            ):
                 return
             marker = (counter, updated)
             previous = self.dvl_rest_marker
@@ -146,14 +213,20 @@ class GuidedBridge:
             if previous is None:
                 return
             if counter < previous[0]:
-                self.reset_navigation('Reinicio del contador DVL: referencias invalidadas')
+                self.samples.pop('dvl', None)
+                self.source_times.pop('dvl', None)
+                self.last_reason = 'Reinicio del contador DVL; movimiento no interrumpido'
                 return
             if counter == previous[0] or updated == previous[1]:
                 return
             self.accept_dvl(
-                message['confidence'], message['position_delta'],
-                message['angle_delta'], message['time_delta_usec'],
-                message.get('time_usec'), 'mavlink2rest')
+                message['confidence'],
+                message['position_delta'],
+                message['angle_delta'],
+                message['time_delta_usec'],
+                message.get('time_usec'),
+                'mavlink2rest',
+            )
         except (KeyError, TypeError, ValueError, OverflowError):
             return
 
@@ -180,8 +253,10 @@ class GuidedBridge:
 
     def _dvl_rest_loop(self):
         system, component = self.dvl_ids
-        url = (f'{self.dvl_rest_base}/vehicles/{system}/components/{component}'
-               '/messages/VISION_POSITION_DELTA')
+        url = (
+            f'{self.dvl_rest_base}/vehicles/{system}/components/{component}'
+            '/messages/VISION_POSITION_DELTA'
+        )
         while not self.dvl_rest_stop.is_set():
             started = time.monotonic()
             try:
@@ -196,6 +271,66 @@ class GuidedBridge:
             elapsed = time.monotonic() - started
             self.dvl_rest_stop.wait(max(0.0, self.dvl_rest_period - elapsed))
 
+    def _queue_tcp_dvl(self, payload):
+        try:
+            self.dvl_tcp_queue.put_nowait(payload)
+        except Full:
+            try:
+                self.dvl_tcp_queue.get_nowait()
+            except Empty:
+                pass
+            try:
+                self.dvl_tcp_queue.put_nowait(payload)
+            except Full:
+                pass
+
+    def _dvl_tcp_loop(self):
+        """Read the A50 persistent JSON stream without opening a socket per sample."""
+        while not self.dvl_tcp_stop.is_set():
+            try:
+                with socket.create_connection(
+                    (self.dvl_tcp_host, self.dvl_tcp_port), timeout=1.0
+                ) as stream:
+                    stream.settimeout(0.5)
+                    buffer = b''
+                    while not self.dvl_tcp_stop.is_set():
+                        try:
+                            chunk = stream.recv(65536)
+                        except socket.timeout:
+                            continue
+                        if not chunk:
+                            break
+                        buffer += chunk
+                        while b'\n' in buffer:
+                            line, buffer = buffer.split(b'\n', 1)
+                            try:
+                                payload = json.loads(line)
+                            except (ValueError, UnicodeDecodeError):
+                                continue
+                            if payload.get('type') == 'velocity':
+                                self._queue_tcp_dvl(payload)
+            except OSError:
+                pass
+            self.dvl_tcp_stop.wait(0.5)
+
+    def drain_tcp_dvl(self):
+        while True:
+            try:
+                payload = self.dvl_tcp_queue.get_nowait()
+            except Empty:
+                return
+            try:
+                valid = payload['velocity_valid']
+                altitude = number(payload['altitude'])
+                if type(valid) is not bool:
+                    continue
+                self.dvl_tcp_seen = True
+                self.dvl_tcp_valid = valid
+                self.dvl_tcp_at = self.clock()
+                self.dvl_altitude = altitude if altitude >= 0 else None
+            except (KeyError, TypeError, ValueError):
+                continue
+
     def observe(self, msg):
         if not self.monitor:
             return
@@ -204,8 +339,13 @@ class GuidedBridge:
         try:
             if kind == 'VISION_POSITION_DELTA' and source == self.dvl_ids:
                 self.accept_dvl(
-                    msg.confidence, msg.position_delta, msg.angle_delta,
-                    msg.time_delta_usec, msg.time_usec, 'udp')
+                    msg.confidence,
+                    msg.position_delta,
+                    msg.angle_delta,
+                    msg.time_delta_usec,
+                    msg.time_usec,
+                    'udp',
+                )
                 return
             if source != (self.b.target_system_id, self.b.target_component_id):
                 return
@@ -236,32 +376,55 @@ class GuidedBridge:
                 ver = int(msg.flight_sw_version)
                 self.version = [(ver >> 24) & 255, (ver >> 16) & 255, (ver >> 8) & 255]
             elif kind == 'PARAM_VALUE':
-                name = msg.param_id.decode(errors='replace') if isinstance(msg.param_id, bytes) else str(msg.param_id)
+                name = (
+                    msg.param_id.decode(errors='replace')
+                    if isinstance(msg.param_id, bytes)
+                    else str(msg.param_id)
+                )
                 self.params[name.rstrip('\x00')] = (number(msg.param_value), self.clock())
         except (ValueError, TypeError, AttributeError):
             self.last_reason = 'Telemetría mal formada: ' + kind
 
     def health(self):
+        """Return sensor diagnostics; these do not own motion authority."""
         reasons = []
-        b = self.b
-        if not b.connected or b.last_heartbeat_time is None or self.clock() - b.last_heartbeat_time >= 1.5:
-            reasons.append('Sin heartbeat reciente')
         for key in ('position', 'velocity', 'yaw', 'pressure', 'ekf', 'dvl', 'voltage'):
-            if self.get(key, 1.5 if key == 'voltage' else 0.8) is None:
+            timeout = 1.5 if key == 'dvl' else self.navigation_sample_timeout
+            if self.get(key, timeout) is None:
                 reasons.append('Sin datos recientes: ' + key)
-        flags = self.get('ekf') or 0
+        flags = self.get('ekf', self.navigation_sample_timeout) or 0
         if (flags & 7) != 7 or not flags & (8 | 16) or flags & (128 | 1024 | 32768):
             reasons.append('EKF no válido para navegar')
         confidence = self.get('dvl')
         if confidence is not None and confidence < self.min_confidence:
             reasons.append('Confianza del mensaje DVL insuficiente')
+        if self.dvl_tcp_seen:
+            if self.clock() - self.dvl_tcp_at >= 0.5:
+                reasons.append('Sin estado directo reciente del DVL')
+            elif self.dvl_tcp_valid is not True:
+                reasons.append('DVL reporta velocidad inválida')
         pressure = self.get('pressure')
         if pressure is not None and not 500 <= pressure <= 1500:
             reasons.append('Presión fuera del rango de esta prueba de piscina')
         return reasons
 
+    def control_health(self):
+        """Faults that really prevent delivery of a controlled setpoint."""
+        b = self.b
+        reasons = []
+        if (
+            not b.connected
+            or b.last_heartbeat_time is None
+            or self.clock() - b.last_heartbeat_time >= self.sequence_heartbeat_timeout
+        ):
+            reasons.append('Sin heartbeat reciente')
+        pressure = self.get('pressure', self.navigation_sample_timeout)
+        if pressure is not None and not 500 <= pressure <= 1500:
+            reasons.append('Presión fuera del rango de esta prueba de piscina')
+        return reasons
+
     def output_reasons(self):
-        reasons = self.health()
+        reasons = self.control_health()
         if not self.enabled:
             reasons.append('Salida real deshabilitada')
         if self.version != [4, 5, 7]:
@@ -279,13 +442,19 @@ class GuidedBridge:
             reasons.append('Mando sin datos recientes')
         if self.b.deadman:
             reasons.append('RB presionado: prioridad manual')
+        if self.guided_request_at is not None:
+            reasons.append('Esperando confirmación real de GUIDED')
+        elif self.guided_settle_started is not None:
+            reasons.append('Estabilizando entrada a GUIDED')
         return reasons
 
     def ticket_ok(self, packet):
         if packet.get('session') != self.session or packet.get('permit') != self.permit:
             return False
-        return any(token == packet.get('ticket') and 0 <= self.clock() - stamp < 0.4
-                   for token, stamp in self.tokens)
+        return any(
+            token == packet.get('ticket') and 0 <= self.clock() - stamp < 0.4
+            for token, stamp in self.tokens
+        )
 
     def receive(self, msg):
         try:
@@ -306,11 +475,28 @@ class GuidedBridge:
             if serial <= self.serial:
                 return
             vn, ve, vd, yaw = [number(v) for v in packet['command']]
-            if math.hypot(vn, ve) > 0.200001 or abs(vd) > 0.100001 or abs(yaw) > math.pi + 0.001:
+            declared = tuple(
+                number(packet['limits'][key])
+                for key in ('horizontal_speed', 'vertical_speed', 'yaw_speed')
+            )
+            if any(value <= 0 for value in declared):
+                raise ValueError('Límites de movimiento no positivos')
+            if self.owner is not None and declared != self.owner_limits:
+                raise ValueError('Límites modificados durante la ejecución')
+            horizontal, vertical, _ = declared
+            if (
+                math.hypot(vn, ve) > horizontal + 1e-6
+                or abs(vd) > vertical + 1e-6
+                or abs(yaw) > math.pi + 0.001
+            ):
                 raise ValueError('Orden fuera de límites')
             self.owner, self.serial = run, serial
+            self.owner_limits = declared
             self.last_command = (vn, ve, vd, yaw)
             self.last_command_at = self.clock()
+            # The entry guard belongs to the idle hold.  Once a fresh command
+            # owner is accepted, the executor's limits and watchdog take over.
+            self.clear_guided_entry()
             self.last_reason = 'Envío GUIDED activo'
         except (ValueError, TypeError, KeyError):
             if self.owner:
@@ -324,6 +510,7 @@ class GuidedBridge:
             action = packet.get('action')
             if action in ('cancel', 'complete', 'manual'):
                 # Cancel is valid even if telemetry is degraded.
+                self.clear_guided_entry()
                 fallback = 'MANUAL' if action == 'manual' else self.holding_mode()
                 self.stop('Fin/cancelación solicitada: ' + action, fallback)
                 if action == 'manual' and self.enabled and self.b.connected:
@@ -331,7 +518,28 @@ class GuidedBridge:
             elif action == 'guided':
                 reasons = self.output_reasons()
                 if not reasons and not self.owner:
-                    self.set_mode('GUIDED')
+                    if self.capture_hold_target():
+                        fault = self.guided_request_fault()
+                        if fault:
+                            self.hold_target = None
+                            self.last_reason = 'GUIDED rechazado: ' + fault
+                        else:
+                            # Latch the MANUAL pose once.  Send it immediately
+                            # after SET_MODE and keep streaming it while the
+                            # heartbeat catches up, closing the interval where
+                            # ArduSub could reuse an earlier GUIDED trajectory.
+                            self.guided_request_at = self.clock()
+                            self.guided_settle_started = None
+                            self.guided_entry_reference = self.hold_target
+                            self.set_mode('GUIDED')
+                            self.send_hold()
+                            self.last_reason = (
+                                'GUIDED solicitado con pose MANUAL retenida ('
+                                + self.hold_target_text()
+                                + '); esperando confirmación real'
+                            )
+                    else:
+                        self.last_reason = 'GUIDED rechazado: posición o rumbo no disponibles'
                 else:
                     self.last_reason = '; '.join(reasons) or 'Ya hay ejecución'
         except (ValueError, TypeError, KeyError):
@@ -346,35 +554,227 @@ class GuidedBridge:
         # Position and acceleration ignored; velocity XYZ and yaw active.
         # Bits: XYZ 1|2|4, acceleration 64|128|256, yaw rate 2048 => 2503.
         self.b.master.mav.set_position_target_local_ned_send(
-            0, self.b.target_system_id, self.b.target_component_id, 1, 2503,
-            0.0, 0.0, 0.0, vn, ve, vd, 0.0, 0.0, 0.0, yaw, 0.0)
+            0,
+            self.b.target_system_id,
+            self.b.target_component_id,
+            1,
+            2503,
+            0.0,
+            0.0,
+            0.0,
+            vn,
+            ve,
+            vd,
+            0.0,
+            0.0,
+            0.0,
+            yaw,
+            0.0,
+        )
 
     def holding_mode(self):
-        if not self.health():
+        if not self.control_health() and not self.health():
             return 'POSHOLD'
         flags = self.get('ekf') or 0
         if self.get('pressure') is not None and flags & 1 and flags & 32:
             return 'ALT_HOLD'
         return 'MANUAL'
 
+    def capture_hold_target(self):
+        position = self.get('position', self.navigation_sample_timeout)
+        yaw = self.get('yaw', self.navigation_sample_timeout)
+        if position is None or yaw is None or len(position) != 3:
+            self.hold_target = None
+            return False
+        try:
+            self.hold_target = tuple(number(v) for v in position) + (number(yaw),)
+        except (ValueError, TypeError):
+            self.hold_target = None
+            return False
+        return True
+
+    def hold_target_text(self):
+        if self.hold_target is None:
+            return 'objetivo no disponible'
+        n, e, d, yaw = self.hold_target
+        return f'N={n:.3f} m, E={e:.3f} m, D={d:.3f} m, yaw={math.degrees(yaw):.2f}°'
+
+    def clear_guided_entry(self):
+        self.guided_request_at = None
+        self.guided_settle_started = None
+        self.guided_entry_reference = None
+
+    def guided_request_fault(self):
+        """Reject mode entry if the vehicle is already translating."""
+        velocity = self.get('velocity', self.navigation_sample_timeout)
+        if velocity is None or len(velocity) != 3:
+            return 'velocidad no disponible'
+        try:
+            horizontal_speed = math.hypot(number(velocity[0]), number(velocity[1]))
+            vertical_speed = abs(number(velocity[2]))
+        except (ValueError, TypeError):
+            return 'velocidad no válida'
+        if horizontal_speed > 0.10:
+            return f'ROV en movimiento horizontal: {horizontal_speed:.3f} m/s'
+        if vertical_speed > 0.10:
+            return f'ROV en movimiento vertical: {vertical_speed:.3f} m/s'
+        return None
+
+    def confirm_guided_entry(self, now):
+        """Confirm GUIDED without replacing the pose latched in MANUAL."""
+        position = self.get('position', self.navigation_sample_timeout)
+        yaw = self.get('yaw', self.navigation_sample_timeout)
+        if self.hold_target is None or position is None or yaw is None or len(position) != 3:
+            self.clear_guided_entry()
+            self.last_reason = 'GUIDED abortado: posición o rumbo no disponibles'
+            self.abort_mode = 'MANUAL'
+            self.abort_until = now + 3.0
+            self.next_mode_request = 0.0
+            return False
+        self.guided_request_at = None
+        self.guided_settle_started = now
+        self.guided_entry_reference = self.hold_target
+        self.last_reason = (
+            'GUIDED confirmado; manteniendo pose previa de MANUAL ('
+            + self.hold_target_text()
+            + ')'
+        )
+        return True
+
+    def guided_entry_fault(self):
+        """Detect an unsafe vertical transient while GUIDED is idle."""
+        if self.guided_entry_reference is None:
+            return None
+        position = self.get('position', self.navigation_sample_timeout)
+        velocity = self.get('velocity', self.navigation_sample_timeout)
+        yaw = self.get('yaw', self.navigation_sample_timeout)
+        if (
+            position is None
+            or velocity is None
+            or yaw is None
+            or len(position) != 3
+            or len(velocity) != 3
+        ):
+            return 'Telemetría de transición no disponible'
+        try:
+            horizontal_error = math.hypot(
+                number(position[0]) - self.guided_entry_reference[0],
+                number(position[1]) - self.guided_entry_reference[1],
+            )
+            depth_error = abs(number(position[2]) - self.guided_entry_reference[2])
+            horizontal_speed = math.hypot(number(velocity[0]), number(velocity[1]))
+            vertical_speed = abs(number(velocity[2]))
+            yaw_error = abs(
+                (number(yaw) - self.guided_entry_reference[3] + math.pi) % (2.0 * math.pi)
+                - math.pi
+            )
+        except (ValueError, TypeError):
+            return 'Telemetría de transición no válida'
+        if horizontal_error > 0.10:
+            return f'Desviación horizontal durante entrada GUIDED: {horizontal_error:.3f} m'
+        if depth_error > 0.08:
+            return f'Desviación vertical durante entrada GUIDED: {depth_error:.3f} m'
+        if yaw_error > math.radians(5.0):
+            return f'Desviación de rumbo durante entrada GUIDED: {math.degrees(yaw_error):.1f}°'
+        if horizontal_speed > 0.15:
+            return f'Velocidad horizontal durante entrada GUIDED: {horizontal_speed:.3f} m/s'
+        if vertical_speed > 0.15:
+            return f'Velocidad vertical durante entrada GUIDED: {vertical_speed:.3f} m/s'
+        return None
+
+    def abort_guided_entry(self, reason, now):
+        self.clear_guided_entry()
+        self.last_reason = 'GUIDED abortado: ' + reason
+        self.abort_mode = 'MANUAL'
+        self.abort_until = now + 3.0
+        self.next_mode_request = 0.0
+
+    def send_hold(self):
+        if self.hold_target is None and not self.capture_hold_target():
+            return False
+        n, e, d, yaw = self.hold_target
+        # ArduSub accepts velocity-only and position-only target combinations.
+        # Mask 2048 enables position, velocity and acceleration simultaneously;
+        # that combination can be rejected, leaving the previous GUIDED yaw
+        # alive. First clear the previous motion with a valid zero-velocity /
+        # zero-yaw-rate target, then install the latched position and yaw.
+        #
+        # 1479: ignore XYZ position, acceleration and yaw; use zero velocity
+        #       and zero yaw rate.
+        self.b.master.mav.set_position_target_local_ned_send(
+            0,
+            self.b.target_system_id,
+            self.b.target_component_id,
+            1,
+            1479,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        )
+        # 2552: use XYZ position and yaw; ignore velocity, acceleration and
+        #       yaw rate.
+        self.b.master.mav.set_position_target_local_ned_send(
+            0,
+            self.b.target_system_id,
+            self.b.target_component_id,
+            1,
+            2552,
+            n,
+            e,
+            d,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            yaw,
+            0.0,
+        )
+        return True
+
     def send_stop(self):
-        yaw = self.get('yaw')
-        if yaw is not None:
-            self.send((0.0, 0.0, 0.0, yaw))
-        else:
-            # Without heading, explicitly command zero yaw rate rather than an old heading.
+        if not self.send_hold():
+            # Without a trustworthy pose, command zero velocity and zero yaw rate.
             self.b.master.mav.set_position_target_local_ned_send(
-                0, self.b.target_system_id, self.b.target_component_id, 1, 1479,
-                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+                0,
+                self.b.target_system_id,
+                self.b.target_component_id,
+                1,
+                1479,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            )
 
     def stop(self, reason, fallback=None):
         owned = self.owner is not None
         self.owner = None
+        self.owner_limits = None
         self.last_command = None
         self.serial = -1
         self.permit = uuid.uuid4().hex
         self.last_reason = reason
         if owned and self.enabled and self.b.mode == 'GUIDED':
+            # Freeze the position reached at cancellation instead of retaining
+            # an old pre-run target while the fallback mode is requested.
+            self.capture_hold_target()
             self.abort_mode = fallback or self.holding_mode()
             self.abort_until = self.clock() + 3.0
             self.next_mode_request = 0.0
@@ -385,14 +785,37 @@ class GuidedBridge:
         self.next_requests = self.clock() + 5.0
         mav = self.b.master.mav
         for msg_id, hz in ((32, 10), (30, 10), (137, 5), (193, 5), (1, 2), (33, 5)):
-            mav.command_long_send(self.b.target_system_id, self.b.target_component_id,
-                                  511, 0, msg_id, int(1e6 / hz), 0, 0, 0, 0, 0)
+            mav.command_long_send(
+                self.b.target_system_id,
+                self.b.target_component_id,
+                511,
+                0,
+                msg_id,
+                int(1e6 / hz),
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
         for msg_id in (148, 49):
-            mav.command_long_send(self.b.target_system_id, self.b.target_component_id,
-                                  512, 0, msg_id, 0, 0, 0, 0, 0, 0)
+            mav.command_long_send(
+                self.b.target_system_id,
+                self.b.target_component_id,
+                512,
+                0,
+                msg_id,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
         for param in ('FS_PILOT_INPUT', 'FS_PILOT_TIMEOUT', 'SYSID_MYGCS'):
-            mav.param_request_read_send(self.b.target_system_id, self.b.target_component_id,
-                                       param.encode('ascii'), -1)
+            mav.param_request_read_send(
+                self.b.target_system_id, self.b.target_component_id, param.encode('ascii'), -1
+            )
 
     def tick(self):
         if not self.monitor:
@@ -401,10 +824,39 @@ class GuidedBridge:
         b = self.b
         try:
             self.drain_rest_dvl()
+            self.drain_tcp_dvl()
             self.requests()
-            if b.mode != self.mode_at_last_tick or b.armed != self.armed_at_last_tick:
+            previous_mode = self.mode_at_last_tick
+            if b.mode != previous_mode or b.armed != self.armed_at_last_tick:
                 self.stop('Cambio de modo/armado; se requiere nueva ejecución')
                 self.mode_at_last_tick, self.armed_at_last_tick = b.mode, b.armed
+                if b.mode != 'GUIDED' and self.guided_request_at is None:
+                    self.guided_settle_started = None
+                    self.guided_entry_reference = None
+                elif (
+                    previous_mode is not None
+                    and b.mode == 'GUIDED'
+                    and self.guided_request_at is None
+                    and not self.owner
+                    and not self.abort_mode
+                ):
+                    # A mode change made outside the sequence UI must not reuse
+                    # a target from an earlier GUIDED session either.
+                    self.hold_target = None
+                    if self.capture_hold_target():
+                        self.confirm_guided_entry(now)
+            if self.guided_request_at is not None:
+                # Repeat the pre-entry target even before the mode heartbeat.
+                # The packet immediately following SET_MODE is then already a
+                # zero-velocity hold for this entry, never an earlier target.
+                if not self.send_hold():
+                    self.abort_guided_entry('pose MANUAL retenida no disponible', now)
+                elif b.mode == 'GUIDED':
+                    self.confirm_guided_entry(now)
+                elif now - self.guided_request_at > 2.0:
+                    self.clear_guided_entry()
+                    self.hold_target = None
+                    self.last_reason = 'GUIDED no confirmado dentro de 2 s'
             if self.owner:
                 reasons = self.output_reasons()
                 if not b.armed or b.mode != 'GUIDED':
@@ -413,7 +865,9 @@ class GuidedBridge:
                     reasons.append('Ejecutor sin órdenes recientes')
                 if reasons:
                     self.stop('; '.join(reasons), 'MANUAL' if b.deadman else self.holding_mode())
-            heartbeat_fresh = b.last_heartbeat_time is not None and now - b.last_heartbeat_time < 1.5
+            heartbeat_fresh = (
+                b.last_heartbeat_time is not None and now - b.last_heartbeat_time < 1.5
+            )
             if self.enabled and b.connected and heartbeat_fresh and b.mode == 'GUIDED':
                 # Neutral pilot input is required by ArduSub's pilot watchdog.
                 # No joystick axes are passed through while GUIDED owns motion.
@@ -428,19 +882,56 @@ class GuidedBridge:
                     if now > self.abort_until:
                         self.abort_mode = 'MANUAL'
                         self.last_reason = 'Sin confirmación de parada: solicitando MANUAL'
+                else:
+                    # GUIDED sin ejecución debe tener siempre un setpoint definido.
+                    # Mantiene la posición N/E/D capturada y el rumbo actual.
+                    self.send_stop()
+                    if self.guided_entry_reference is not None:
+                        fault = self.guided_entry_fault()
+                        if fault:
+                            self.abort_guided_entry(fault, now)
+                            self.set_mode('MANUAL')
+                            self.next_mode_request = now + 0.5
+                        elif (
+                            self.guided_settle_started is not None
+                            and now - self.guided_settle_started >= 5.0
+                        ):
+                            self.guided_settle_started = None
+                            self.last_reason = 'GUIDED estable; listo para iniciar'
             elif self.abort_mode:
                 self.abort_mode = None
             token = uuid.uuid4().hex
             self.tokens.append((token, now))
             packet = {
-                'session': self.session, 'nav_epoch': self.nav_epoch,
-                'permit': self.permit, 'ticket': token, 'enabled': self.enabled,
-                'armed': b.armed, 'mode': b.mode, 'connected': b.connected,
-                'health': self.health(), 'blockers': self.output_reasons(),
-                'reason': self.last_reason, 'owner': self.owner,
-                'version': self.version, 'stopping': self.abort_mode,
+                'session': self.session,
+                'nav_epoch': self.nav_epoch,
+                'permit': self.permit,
+                'ticket': token,
+                'enabled': self.enabled,
+                'armed': b.armed,
+                'mode': b.mode,
+                'connected': b.connected,
+                'health': self.control_health(),
+                'diagnostics': self.health(),
+                'blockers': self.output_reasons(),
+                'reason': self.last_reason,
+                'owner': self.owner,
+                'active_motion_limits': self.owner_limits,
+                'paused': False,
+                'pause_elapsed': None,
+                'pause_reason': None,
+                'dvl_velocity_valid': self.dvl_tcp_valid if self.dvl_tcp_seen else None,
+                'dvl_altitude': self.dvl_altitude,
+                'version': self.version,
+                'stopping': self.abort_mode,
+                'guided_entry_pending': self.guided_request_at is not None,
+                'guided_settling': self.guided_settle_started is not None,
+                'hold_target': list(self.hold_target) if self.hold_target is not None else None,
                 'dvl_input': self.dvl_input,
-                'samples': {k: self.get(k, 1.5 if k == 'voltage' else 0.8) for k in self.samples},
+                'samples': {
+                    k: self.get(k, 1.5 if k == 'dvl' else self.navigation_sample_timeout)
+                    for k in self.samples
+                },
             }
             out = String()
             out.data = json.dumps(packet, allow_nan=False)
@@ -456,4 +947,7 @@ class GuidedBridge:
         self.dvl_rest_stop.set()
         if self.dvl_rest_thread is not None:
             self.dvl_rest_thread.join(timeout=self.dvl_rest_timeout + 0.2)
+        self.dvl_tcp_stop.set()
+        if self.dvl_tcp_thread is not None:
+            self.dvl_tcp_thread.join(timeout=1.0)
         self.stop('Puente cerrado')

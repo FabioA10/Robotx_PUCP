@@ -1,4 +1,4 @@
-"""Hardware-independent sequence controller. NED velocities; surface depth in m."""
+"""Hardware-independent mixed sequence controller; NED velocities."""
 
 from dataclasses import dataclass
 import math
@@ -38,46 +38,98 @@ class Limits:
     yaw_tolerance: float = math.radians(5)
     dwell: float = 1.0
     step_timeout: float = 60.0
+    timed_motion_limit: float = 30.0
 
     def __post_init__(self):
         for value in vars(self).values():
             if number(value) <= 0:
                 raise ValueError('Los límites deben ser positivos')
-        if self.horizontal_speed > 0.20 or self.vertical_speed > 0.10:
-            raise ValueError('Esta versión limita velocidad a 0.20/0.10 m/s')
 
 
-def parse_steps(steps):
+POSITION_KINDS = {'advance', 'lateral', 'turn', 'depth'}
+TIMED_KINDS = {'velocity_surge', 'velocity_sway', 'velocity_heave', 'velocity_yaw'}
+ALL_KINDS = POSITION_KINDS | TIMED_KINDS | {'wait'}
+
+
+def _legacy_step(item):
+    """Accept the previous [kind, value] format during migration."""
+    if not isinstance(item, (list, tuple)) or len(item) != 2:
+        return None
+    kind, value = item
+    if kind == 'wait':
+        return {'kind': 'wait', 'duration': value}
+    return {'kind': kind, 'value': value}
+
+
+def parse_steps(steps, limits=None):
+    """Normalize old and new queue entries and enforce motion limits."""
+    limits = limits or Limits()
     if not isinstance(steps, list) or not 1 <= len(steps) <= 50:
         raise ValueError('La secuencia necesita entre 1 y 50 pasos')
     result = []
-    for item in steps:
-        if not isinstance(item, (list, tuple)) or len(item) != 2:
+    for raw in steps:
+        item = dict(raw) if isinstance(raw, dict) else _legacy_step(raw)
+        if item is None:
             raise ValueError('Paso mal formado')
-        kind, value = item
-        value = number(value)
-        if kind not in ('advance', 'turn', 'depth', 'wait'):
+        kind = item.get('kind')
+        if kind not in ALL_KINDS:
             raise ValueError('Tipo de paso desconocido')
-        if kind in ('depth', 'wait') and value < 0:
-            raise ValueError('Profundidad y espera deben ser no negativas')
-        if kind == 'turn' and abs(value) > 180:
-            raise ValueError('Cada giro debe estar entre -180 y 180 grados')
-        if kind == 'wait' and value > 30:
-            raise ValueError('La espera máxima por paso es 30 s')
-        result.append((kind, value))
+        normalized = {'kind': kind}
+        if kind == 'wait':
+            duration = number(item.get('duration'))
+            if not 0 <= duration <= limits.timed_motion_limit:
+                raise ValueError('La espera está fuera del rango permitido')
+            normalized['duration'] = duration
+        elif kind in TIMED_KINDS:
+            speed = number(item.get('speed'))
+            duration = number(item.get('duration'))
+            speed_limit = (
+                limits.yaw_speed
+                if kind == 'velocity_yaw'
+                else (
+                    limits.vertical_speed if kind == 'velocity_heave' else limits.horizontal_speed
+                )
+            )
+            if abs(speed) > speed_limit + 1e-9:
+                unit = 'rad/s' if kind == 'velocity_yaw' else 'm/s'
+                raise ValueError(f'Velocidad temporal fuera del límite ({speed_limit:g} {unit})')
+            if not 0 < duration <= limits.timed_motion_limit:
+                raise ValueError('La duración debe ser mayor que cero y no superar 30 s')
+            normalized.update(speed=speed, duration=duration)
+        else:
+            value = number(item.get('value'))
+            if kind == 'turn' and abs(value) > 180:
+                raise ValueError('Cada giro debe estar entre -180 y 180 grados')
+            if kind == 'depth' and value < 0:
+                raise ValueError('La profundidad debe ser no negativa')
+            default_speed = (
+                limits.yaw_speed
+                if kind == 'turn'
+                else limits.vertical_speed
+                if kind == 'depth'
+                else limits.horizontal_speed
+            )
+            speed = abs(number(item.get('speed', default_speed)))
+            if speed <= 0 or speed > default_speed + 1e-9:
+                raise ValueError('Velocidad máxima del paso fuera de límites')
+            normalized.update(value=value, speed=speed)
+        result.append(normalized)
     return result
 
 
 def goal_for(pose, step):
-    kind, value = step
+    kind = step['kind']
     n, e, d, yaw = pose.n, pose.e, pose.depth, pose.yaw
     if kind == 'advance':
-        n += value * math.cos(yaw)
-        e += value * math.sin(yaw)
+        n += step['value'] * math.cos(yaw)
+        e += step['value'] * math.sin(yaw)
+    elif kind == 'lateral':
+        n -= step['value'] * math.sin(yaw)
+        e += step['value'] * math.cos(yaw)
     elif kind == 'turn':
-        yaw = wrap(yaw + math.radians(value))
+        yaw = wrap(yaw + math.radians(step['value']))
     elif kind == 'depth':
-        d = value
+        d = step['value']
     return Pose(n, e, d, yaw)
 
 
@@ -96,6 +148,15 @@ class Sequence:
         self.last_time = None
         self.errors = (0.0, 0.0, 0.0)
         self.home_target = None
+        self.last_pose = None
+
+    @property
+    def current_step(self):
+        return self.steps[self.index] if self.state == 'RUNNING' else None
+
+    @property
+    def timed(self):
+        return bool(self.current_step and self.current_step['kind'] in TIMED_KINDS)
 
     def check_bounds(self, pose, anchor, margin=0.0):
         if not -margin <= pose.depth <= self.limits.max_depth + margin:
@@ -104,13 +165,14 @@ class Sequence:
             raise ValueError('Objetivo fuera del radio configurado')
 
     def validate(self, pose, steps, home=None):
-        parsed = parse_steps(steps)
+        parsed = parse_steps(steps, self.limits)
         anchor = home or pose
         self.check_bounds(pose, anchor, self.limits.depth_tolerance)
         goal = pose
         for step in parsed:
-            goal = goal_for(goal, step)
-            self.check_bounds(goal, anchor)
+            if step['kind'] in POSITION_KINDS:
+                goal = goal_for(goal, step)
+                self.check_bounds(goal, anchor)
         return parsed
 
     def start(self, pose, steps, now, home=None, returning=False):
@@ -125,22 +187,28 @@ class Sequence:
         self.reason = 'Ejecutando'
         self.yaw_command = pose.yaw
         self.last_time = now
+        self.last_pose = pose
         self.begin_step(pose, now)
 
     def begin_step(self, pose, now):
-        self.goal = goal_for(pose, self.steps[self.index])
-        # Home has a fixed saved endpoint even if earlier steps ended with error.
+        step = self.steps[self.index]
+        self.goal = goal_for(pose, step)
         if self.home_target:
             h = self.home_target
-            kind = self.steps[self.index][0]
+            kind = step['kind']
             if kind == 'depth':
                 self.goal = Pose(pose.n, pose.e, h.depth, pose.yaw)
             elif kind == 'advance':
                 self.goal = Pose(h.n, h.e, h.depth, pose.yaw)
             elif kind == 'turn':
-                yaw = h.yaw if self.index == len(self.steps) - 1 else math.atan2(h.e - pose.e, h.n - pose.n)
+                yaw = (
+                    h.yaw
+                    if self.index == len(self.steps) - 1
+                    else math.atan2(h.e - pose.e, h.n - pose.n)
+                )
                 self.goal = Pose(pose.n, pose.e, h.depth, yaw)
-        self.check_bounds(self.goal, self.anchor)
+        if step['kind'] in POSITION_KINDS:
+            self.check_bounds(self.goal, self.anchor)
         self.started = now
         self.inside_since = None
 
@@ -151,22 +219,68 @@ class Sequence:
         self.goal = None
         self.inside_since = None
 
+    def hold(self, now):
+        if self.state != 'RUNNING':
+            return
+        now = number(now)
+        if self.last_time is not None:
+            elapsed = max(0.0, now - self.last_time)
+            if self.started is not None:
+                self.started += elapsed
+        self.last_time = now
+        self.inside_since = None
+
+    def _advance_step(self, pose, now):
+        self.index += 1
+        if self.index == len(self.steps):
+            self.state = 'COMPLETED'
+            self.reason = 'Secuencia completada'
+            self.steps = []
+            self.goal = None
+            return None
+        self.begin_step(pose, now)
+        return (0.0, 0.0, 0.0, pose.yaw)
+
+    def _timed_command(self, step, pose, dt):
+        kind, speed = step['kind'], step['speed']
+        vn = ve = vd = 0.0
+        if kind == 'velocity_surge':
+            vn, ve = speed * math.cos(pose.yaw), speed * math.sin(pose.yaw)
+        elif kind == 'velocity_sway':
+            vn, ve = -speed * math.sin(pose.yaw), speed * math.cos(pose.yaw)
+        elif kind == 'velocity_heave':
+            vd = speed
+        elif kind == 'velocity_yaw':
+            self.yaw_command = wrap(self.yaw_command + speed * dt)
+        return (vn, ve, vd, self.yaw_command)
+
     def update(self, pose, now, valid=True, reason='Datos no válidos', speed=0.0):
         if self.state != 'RUNNING':
             return None
         if not valid:
             self.cancel(reason)
             return None
-        try:
-            self.check_bounds(pose, self.anchor, self.limits.depth_tolerance)
-        except ValueError as exc:
-            self.cancel(str(exc))
+        if pose is not None:
+            self.last_pose = pose
+        pose = pose or self.last_pose
+        if pose is None:
+            self.cancel('No existe una referencia para el control')
             return None
         if self.last_time is None or not 0 <= now - self.last_time <= 0.5:
             self.cancel('Interrupción del bucle de control')
             return None
         dt = now - self.last_time
         self.last_time = now
+        step = self.current_step
+        if step['kind'] in TIMED_KINDS:
+            if now - self.started >= step['duration']:
+                return self._advance_step(pose, now)
+            return self._timed_command(step, pose, dt)
+        try:
+            self.check_bounds(pose, self.anchor, self.limits.depth_tolerance)
+        except ValueError as exc:
+            self.cancel(str(exc))
+            return None
         if now - self.started > self.limits.step_timeout:
             self.cancel('Tiempo máximo del paso superado')
             return None
@@ -175,36 +289,35 @@ class Sequence:
         dyaw = wrap(goal.yaw - pose.yaw)
         xy = math.hypot(dn, de)
         self.errors = (xy, abs(dd), abs(math.degrees(dyaw)))
-        inside = (xy <= self.limits.xy_tolerance and abs(dd) <= self.limits.depth_tolerance
-                  and abs(dyaw) <= self.limits.yaw_tolerance and speed <= 0.08)
+        inside = (
+            xy <= self.limits.xy_tolerance
+            and abs(dd) <= self.limits.depth_tolerance
+            and abs(dyaw) <= self.limits.yaw_tolerance
+            and speed <= 0.08
+        )
         if inside:
             if self.inside_since is None:
                 self.inside_since = now
-            wait = self.steps[self.index][1] if self.steps[self.index][0] == 'wait' else 0
+            wait = step['duration'] if step['kind'] == 'wait' else 0
             if now - self.inside_since >= max(self.limits.dwell, wait):
-                self.index += 1
-                if self.index == len(self.steps):
-                    self.state = 'COMPLETED'
-                    self.reason = 'Secuencia completada'
-                    self.steps = []
-                    self.goal = None
-                    return None
-                try:
-                    self.begin_step(pose, now)
-                except ValueError as exc:
-                    self.cancel(str(exc))
-                return (0.0, 0.0, 0.0, pose.yaw)
+                return self._advance_step(pose, now)
         else:
             self.inside_since = None
-        # Heading must be close before translating; depth steps retain XY.
-        scale = min(0.5, self.limits.horizontal_speed / max(xy, 1e-9))
+        max_horizontal = (
+            step['speed']
+            if step['kind'] in ('advance', 'lateral')
+            else self.limits.horizontal_speed
+        )
+        scale = min(0.5, max_horizontal / max(xy, 1e-9))
         vn, ve = dn * scale, de * scale
         if abs(dyaw) > math.radians(15):
             vn = ve = 0.0
-        vd = max(-self.limits.vertical_speed, min(self.limits.vertical_speed, dd * 0.5))
+        vertical_limit = step['speed'] if step['kind'] == 'depth' else self.limits.vertical_speed
+        vd = max(-vertical_limit, min(vertical_limit, dd * 0.5))
         delta = wrap(goal.yaw - self.yaw_command)
-        limit = self.limits.yaw_speed * dt
-        self.yaw_command = wrap(self.yaw_command + max(-limit, min(limit, delta)))
+        yaw_speed = step['speed'] if step['kind'] == 'turn' else self.limits.yaw_speed
+        yaw_limit = yaw_speed * dt
+        self.yaw_command = wrap(self.yaw_command + max(-yaw_limit, min(yaw_limit, delta)))
         return (vn, ve, vd, self.yaw_command)
 
 
@@ -212,8 +325,11 @@ def return_steps(current, home):
     dn, de = home.n - current.n, home.e - current.e
     distance = math.hypot(dn, de)
     yaw = math.atan2(de, dn) if distance > 1e-6 else current.yaw
-    steps = [('depth', home.depth)]
+    steps = [{'kind': 'depth', 'value': home.depth}]
     if distance > 1e-6:
-        steps += [('turn', math.degrees(wrap(yaw - current.yaw))), ('advance', distance)]
-    steps += [('turn', math.degrees(wrap(home.yaw - yaw)))]
+        steps += [
+            {'kind': 'turn', 'value': math.degrees(wrap(yaw - current.yaw))},
+            {'kind': 'advance', 'value': distance},
+        ]
+    steps += [{'kind': 'turn', 'value': math.degrees(wrap(home.yaw - yaw))}]
     return steps
