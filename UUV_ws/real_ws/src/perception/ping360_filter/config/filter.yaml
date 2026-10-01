@@ -1,0 +1,73 @@
+ping360_filter:
+  ros__parameters:
+    # Entrada real y salidas compatibles con el proyecto.
+    input_topic: /ping360/points
+    filtered_topic: /ping360/points_filtered
+    legacy_filtered_topic: /ping360/filtered_points
+    filtered_scan_topic: /ping360/real_scan
+    target_topic: /ping360/target
+    tracking_marker_topic: /ping360/tracking_marker
+    tracking_status_topic: /ping360/tracking_status
+    compatibility_status_topic: /pipeline/status
+    contour_status_topic: /ping360/pool_contour_status
+    stats_topic: /ping360/filter_stats
+
+    # La simulacion usa estos tres topicos Float32.
+    compatibility_distance_topic: /pipeline/distance
+    compatibility_bearing_topic: /pipeline/bearing
+    compatibility_heading_topic: /pipeline/heading
+    publish_simulation_compatibility: true
+
+    # Geometria inferida de los rosbags. El paso radial se comprueba al inicio.
+    angle_count: 100
+    range_bin_count: 400
+    angle_step_deg: 3.6
+    range_step_m: 0.0124875
+    auto_infer_range_step: true
+    full_rotation_period_sec: 15.0
+
+    filter_mode: pool_contour
+    pool_length_m: 4.0
+    pool_width_m: 2.0
+    pool_range_margin_m: 0.15
+    # Radio máximo local para aceptar ecos del contorno (se puede sobreescribir al ejecutar).
+    contour_max_range_m: 2.0
+    contour_min_range_m: 0.70
+    contour_min_intensity: 90.0
+    contour_residual_threshold: 45.0
+    contour_background_window_bins: 41
+    contour_min_component_pixels: 4
+    # Exige componentes suficientemente densos y extendidos para el seguimiento posterior.
+    contour_min_points: 16
+    contour_min_angular_span_deg: 15.0
+
+    # Filtro espacial y de intensidad.
+    min_range_m: 0.70
+    max_range_m: 4.80
+    minimum_intensity: 90.0
+    residual_threshold: 45.0
+    background_window_bins: 41
+    min_component_pixels: 4
+    warmup_wraps: 1
+
+    # Objeto compacto buscado en el sector frontal de 140 grados.
+    target_min_range_m: 0.80
+    target_max_range_m: 4.00
+    target_search_center_deg: 0.0
+    target_search_half_width_deg: 70.0
+    target_min_points: 4
+    target_max_points: 180
+    target_max_angular_span_deg: 25.0
+    target_max_radial_span_m: 0.50
+    target_max_extent_m: 0.55
+
+    # Confirmacion temporal para no confundir un reflejo aislado con la boya.
+    tracker_association_distance_m: 0.45
+    tracker_confirmation_rotations: 3
+    tracker_maximum_misses: 1
+    tracker_smoothing_alpha: 0.45
+    tracker_minimum_valid_confidence: 0.55
+    tracking_timeout_sec: 22.5
+
+    # Coincide con target_bearing=90 del pipeline_follower_node simulado.
+    orbit_desired_bearing_deg: 90.0
