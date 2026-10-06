@@ -14,6 +14,7 @@ from python_qt_binding.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -38,6 +39,7 @@ from uuv_dashboard.pool_model import (
 from uuv_dashboard.pool_operator_model import mode_request_allowed, OPERATOR_MODES
 from uuv_dashboard.pool_preflight_model import evaluate
 from uuv_dashboard.sonar_view import SonarView
+from uuv_dashboard.theme import apply_theme, set_widget_state
 
 
 class PoolDashboard(QWidget):
@@ -62,32 +64,40 @@ class PoolDashboard(QWidget):
         self.mode_requested_at = 0.0
         title_suffix = 'perfil manual supervisado' if self.operator_profile else 'solo lectura'
         self.setWindowTitle(f'RobotX | Preparación de piscina — {title_suffix}')
-        self.resize(1120, 780)
-        self.setStyleSheet(
-            'QWidget {background:#17212b; color:#eef2f6; font-size:14px;}'
-            'QPushButton,QComboBox,QDoubleSpinBox {padding:6px;}'
-            'QPushButton {background:#304456;}'
-            'QLabel {padding:3px;}'
-        )
+        self.setObjectName('RobotXRoot')
+        self.resize(1280, 820)
+        self.setMinimumSize(1050, 700)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
         title_text = (
             'Preparación de piscina · mando supervisado; secuencias bloqueadas'
             if self.operator_profile
             else 'Preparación de piscina · SIN órdenes de movimiento'
         )
         title = QLabel(title_text)
-        title.setStyleSheet('font-size:21px; font-weight:bold; color:#6cd8e5;')
+        title.setObjectName('AppTitle')
         layout.addWidget(title)
         self.status = QLabel('Esperando telemetría…')
+        self.status.setObjectName('StatusBanner')
+        set_widget_state(self.status, 'neutral')
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         tabs = QTabWidget()
+        tabs.setObjectName('MainTabs')
         self.tabs = tabs
         layout.addWidget(tabs)
         telemetry = QWidget()
         tl = QVBoxLayout(telemetry)
-        grid = QGridLayout()
-        tl.addLayout(grid)
+        cards = QHBoxLayout()
+        cards.setSpacing(12)
+        tl.addLayout(cards)
+        vehicle_group = QGroupBox('Estado del vehículo')
+        vehicle_grid = QGridLayout(vehicle_group)
+        navigation_group = QGroupBox('Navegación y estimación')
+        navigation_grid = QGridLayout(navigation_group)
+        cards.addWidget(vehicle_group, 1)
+        cards.addWidget(navigation_group, 1)
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         scalar_fields = [
             ('connected', 'Conexión', Bool, '/uuv/connected'),
@@ -118,10 +128,22 @@ class PoolDashboard(QWidget):
             ('velocity', 'Velocidad N/E/D [m/s]'),
             ('attitude', 'Roll/Pitch/Yaw [°]'),
         ]
-        for row, (key, label) in enumerate(fields):
-            grid.addWidget(QLabel(label), row, 0)
+        vehicle_keys = {
+            'connected', 'armed', 'mode', 'voltage', 'output', 'deadman', 'motion_allowed'
+        }
+        rows = {'vehicle': 0, 'navigation': 0}
+        for key, label in fields:
+            group = 'vehicle' if key in vehicle_keys else 'navigation'
+            grid = vehicle_grid if group == 'vehicle' else navigation_grid
+            row = rows[group]
+            field_label = QLabel(label)
+            field_label.setObjectName('FieldLabel')
+            grid.addWidget(field_label, row, 0)
             self.labels[key] = QLabel('Sin datos')
+            self.labels[key].setObjectName('TelemetryValue')
+            set_widget_state(self.labels[key], 'neutral')
             grid.addWidget(self.labels[key], row, 1)
+            rows[group] += 1
         for key, _, msg_type, topic in scalar_fields:
             self.subscriptions.append(
                 node.create_subscription(
@@ -147,21 +169,28 @@ class PoolDashboard(QWidget):
             'no antigüedad de la medición del DVL.'
         )
         note.setWordWrap(True)
+        note.setObjectName('MutedText')
         tl.addWidget(note)
         self.ekf_text = QLabel('')
         self.ekf_text.setWordWrap(True)
+        self.ekf_text.setObjectName('TelemetryValue')
         tl.addWidget(self.ekf_text)
         reference_button = QPushButton('Tomar referencia para medir variación XY')
+        reference_button.setObjectName('PrimaryAction')
         reference_button.clicked.connect(self.capture_reference)
         tl.addWidget(reference_button)
         self.drift = QLabel('Sin referencia. Mantén el ROV quieto para medir deriva.')
+        self.drift.setObjectName('MutedText')
         tl.addWidget(self.drift)
         tl.addStretch()
         tabs.addTab(telemetry, 'Telemetría')
         tabs.addTab(self.make_preflight(), 'Preflight · piscina')
         if self.operator_profile:
             tabs.addTab(self.make_operator_controls(), 'Mando · modos')
-        self.video = QLabel('Esperando video…')
+        self.video = QLabel(
+            'CÁMARA SIN DATOS\n\nEsperando /camera/image/compressed'
+        )
+        self.video.setObjectName('VideoSurface')
         self.video.setAlignment(Qt.AlignCenter)
         self.video.setMinimumSize(320, 180)
         tabs.addTab(self.video, 'Cámara')
@@ -301,7 +330,7 @@ class PoolDashboard(QWidget):
         page = QWidget()
         layout = QVBoxLayout(page)
         title = QLabel('Preflight de piscina · sesión de observación y registro')
-        title.setStyleSheet('font-size:17px; font-weight:bold; color:#6cd8e5;')
+        title.setObjectName('SectionTitle')
         layout.addWidget(title)
         note = QLabel(
             'Este panel no habilita armado, propulsión ni movimientos. Un estado '
@@ -327,6 +356,8 @@ class PoolDashboard(QWidget):
         self.camera_required.toggled.connect(self.update_preflight)
         layout.addWidget(self.camera_required)
         self.preflight_status = QLabel('NO GO · completa la lista y conecta el ROV')
+        self.preflight_status.setObjectName('StatusBanner')
+        set_widget_state(self.preflight_status, 'warning')
         self.preflight_status.setWordWrap(True)
         layout.addWidget(self.preflight_status)
         self.preflight_detail = QTextEdit()
@@ -338,7 +369,7 @@ class PoolDashboard(QWidget):
         page = QWidget()
         layout = QVBoxLayout(page)
         title = QLabel('Mando Xbox y cambios de modo supervisados')
-        title.setStyleSheet('font-size:17px; font-weight:bold; color:#6cd8e5;')
+        title.setObjectName('SectionTitle')
         layout.addWidget(title)
         note = QLabel(
             'Los sticks no se controlan desde esta pantalla: llegan del mando '
@@ -423,7 +454,9 @@ class PoolDashboard(QWidget):
             self.mode_status.setText(f'Modo confirmado por el ROV: {self.pending_mode}')
             self.pending_mode = None
         elif self.data.clock() - self.mode_requested_at > 5.0:
-            self.mode_status.setText('Sin confirmación en 5 s. Revisa el modo real y la terminal.')
+            self.mode_status.setText(
+                'Sin confirmación en 5 s. Revisa el modo real y la terminal.'
+            )
             self.pending_mode = None
 
     def update_preflight(self, *_):
@@ -442,7 +475,7 @@ class PoolDashboard(QWidget):
             self.preflight_status.setText(
                 'LISTO PARA OBSERVACIÓN/REGISTRO · ROV desarmado · salida ROS bloqueada'
             )
-            self.preflight_status.setStyleSheet('color:#2ecc71; font-weight:bold;')
+            set_widget_state(self.preflight_status, 'success')
             self.preflight_detail.setPlainText(
                 'Siguiente paso: inicia record_pool.sh en otra terminal, introduce '
                 'el ROV en el agua y mantén 60 s de telemetría quieta. Este estado '
@@ -450,7 +483,7 @@ class PoolDashboard(QWidget):
             )
         else:
             self.preflight_status.setText('NO GO · no iniciar la sesión')
-            self.preflight_status.setStyleSheet('color:#e67e22; font-weight:bold;')
+            set_widget_state(self.preflight_status, 'warning')
             self.preflight_detail.setPlainText('\n'.join('• ' + reason for reason in reasons))
 
     def sequence_status(self, msg):
@@ -613,24 +646,48 @@ class PoolDashboard(QWidget):
                     text = str(value)
                 label.setText(f'{text} · recibido hace {age:.1f} s')
             if key == 'mode':
-                color = (
-                    '#f1c40f'
+                state = (
+                    'warning'
                     if connected and value == 'MANUAL'
-                    else ('#2ecc71' if connected and value is not None else '#a0a8b0')
+                    else ('success' if connected and value is not None else 'neutral')
                 )
-                label.setStyleSheet(f'color:{color}; font-weight:bold;')
+                set_widget_state(label, state)
+            elif key == 'connected':
+                state = (
+                    'success'
+                    if value is True
+                    else ('danger' if value is False else 'neutral')
+                )
+                set_widget_state(label, state)
+            elif key == 'armed':
+                state = (
+                    'danger'
+                    if connected and value is True
+                    else ('success' if connected and value is False else 'neutral')
+                )
+                set_widget_state(label, state)
+            elif key in ('output', 'motion_allowed'):
+                state = (
+                    'warning'
+                    if connected and value is True
+                    else ('success' if connected and value is False else 'neutral')
+                )
+                set_widget_state(label, state)
         flags = self.data.get('ekf') if connected else None
         self.ekf_text.setText('EKF: ' + ekf_description(flags))
         if not connected:
             self.status.setText('Sin conexión reciente. Puedes preparar secuencias ficticias.')
+            set_widget_state(self.status, 'danger')
         elif self.data.get('armed') is not False or self.data.get('output') is not False:
             self.status.setText(
                 'Revisa el estado: esta prueba requiere desarmado y salida ROS deshabilitada.'
             )
+            set_widget_state(self.status, 'warning')
         else:
             self.status.setText(
                 'Conectado y desarmado · salida ROS deshabilitada · navegación aún no validada'
             )
+            set_widget_state(self.status, 'success')
         mode = self.data.get('mode') if connected else None
         if self.source.currentData() == 'live':
             try:
@@ -666,7 +723,10 @@ class PoolDashboard(QWidget):
                 self.pixmap.scaled(self.video.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
         else:
-            self.video.setText('Sin video reciente')
+            self.video.setText(
+                'CÁMARA SIN DATOS RECIENTES\n\n'
+                'Esperando /camera/image/compressed'
+            )
         self.sonar.refresh()
         self.update_preflight()
 
@@ -674,6 +734,7 @@ class PoolDashboard(QWidget):
 def main(args=None):
     rclpy.init(args=args)
     app = QApplication(sys.argv[:1])
+    apply_theme(app)
     node = Node('uuv_pool_dashboard')
     window = PoolDashboard(node)
     signal.signal(signal.SIGINT, lambda *_: app.quit())

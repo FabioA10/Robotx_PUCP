@@ -15,6 +15,12 @@ from std_msgs.msg import String
 from .sequence_core import number
 
 
+GUIDED_ENTRY_MAX_SPEED_MPS = 0.15
+GUIDED_HOLD_MAX_HORIZONTAL_ERROR_M = 0.20
+GUIDED_HOLD_MAX_VERTICAL_ERROR_M = 0.12
+GUIDED_HOLD_MAX_YAW_ERROR_RAD = math.radians(15.0)
+
+
 class GuidedBridge:
     def __init__(self, bridge, clock=time.monotonic):
         self.b = bridge
@@ -93,6 +99,7 @@ class GuidedBridge:
         self.last_command = None
         self.last_command_at = 0.0
         self.hold_target = None
+        self.holding_completed_goal = False
         self.guided_request_at = None
         self.guided_settle_started = None
         self.guided_entry_reference = None
@@ -494,6 +501,7 @@ class GuidedBridge:
             self.owner_limits = declared
             self.last_command = (vn, ve, vd, yaw)
             self.last_command_at = self.clock()
+            self.holding_completed_goal = False
             # The entry guard belongs to the idle hold.  Once a fresh command
             # owner is accepted, the executor's limits and watchdog take over.
             self.clear_guided_entry()
@@ -508,6 +516,9 @@ class GuidedBridge:
             if not isinstance(packet, dict) or not self.ticket_ok(packet):
                 return
             action = packet.get('action')
+            if action == 'complete' and packet.get('hold_target') is not None:
+                if self.complete_hold(packet['hold_target']):
+                    return
             if action in ('cancel', 'complete', 'manual'):
                 # Cancel is valid even if telemetry is degraded.
                 self.clear_guided_entry()
@@ -517,6 +528,8 @@ class GuidedBridge:
                     self.set_mode('MANUAL')
             elif action == 'guided':
                 reasons = self.output_reasons()
+                if self.b.mode != 'MANUAL':
+                    reasons.append('La entrada segura a GUIDED debe comenzar en MANUAL')
                 if not reasons and not self.owner:
                     if self.capture_hold_target():
                         fault = self.guided_request_fault()
@@ -524,19 +537,30 @@ class GuidedBridge:
                             self.hold_target = None
                             self.last_reason = 'GUIDED rechazado: ' + fault
                         else:
-                            # Latch the MANUAL pose once.  Send it immediately
-                            # after SET_MODE and keep streaming it while the
-                            # heartbeat catches up, closing the interval where
-                            # ArduSub could reuse an earlier GUIDED trajectory.
+                            # Remember the MANUAL pose only as a transition
+                            # guard. Never expose it as a GUIDED position target:
+                            # the vehicle may move slightly before the mode
+                            # heartbeat arrives, and ArduSub may still retain a
+                            # target from an earlier GUIDED session.
+                            manual_reference = self.hold_target
+                            self.hold_target = None
                             self.guided_request_at = self.clock()
                             self.guided_settle_started = None
-                            self.guided_entry_reference = self.hold_target
+                            self.guided_entry_reference = manual_reference
+
+                            # Preload a neutral velocity command, request the
+                            # mode, then immediately overwrite any retained
+                            # GUIDED target with more neutral commands. Position
+                            # hold is enabled only after the GUIDED heartbeat and
+                            # a fresh pose/velocity sample have been received.
+                            self.send_zero_velocity()
+                            self.send_zero_velocity()
                             self.set_mode('GUIDED')
-                            self.send_hold()
+                            self.send_zero_velocity()
+                            self.send_zero_velocity()
                             self.last_reason = (
-                                'GUIDED solicitado con pose MANUAL retenida ('
-                                + self.hold_target_text()
-                                + '); esperando confirmación real'
+                                'GUIDED solicitado con frenado neutro; '
+                                'esperando confirmación para capturar la pose actual'
                             )
                     else:
                         self.last_reason = 'GUIDED rechazado: posición o rumbo no disponibles'
@@ -580,6 +604,57 @@ class GuidedBridge:
             return 'ALT_HOLD'
         return 'MANUAL'
 
+    def complete_hold(self, target):
+        """Retain a close final NED target after a healthy positional run."""
+        if (
+            not self.owner or not self.enabled or not self.b.connected
+            or not self.b.armed or self.b.mode != 'GUIDED'
+            or self.abort_mode or self.output_reasons() or self.completed_hold_health()
+        ):
+            return False
+        position = self.get('position', min(0.5, self.navigation_sample_timeout))
+        yaw = self.get('yaw', min(0.5, self.navigation_sample_timeout))
+        if position is None or yaw is None:
+            return False
+        try:
+            if not isinstance(target, (list, tuple)) or len(target) != 4:
+                return False
+            n, e, d, heading = (number(v) for v in target)
+            heading_error = abs((heading - yaw + math.pi) % (2 * math.pi) - math.pi)
+            # Accept only a nearby completion correction, never a new distant
+            # waypoint embedded in a completion message.
+            if (
+                abs(heading) > math.pi + 0.001
+                or math.hypot(n - position[0], e - position[1]) > 0.25
+                or abs(d - position[2]) > 0.15
+                or heading_error > math.radians(10)
+            ):
+                return False
+        except (TypeError, ValueError, IndexError):
+            return False
+        self.hold_target = (n, e, d, heading)
+        self.holding_completed_goal = True
+        self.owner = None
+        self.owner_limits = None
+        self.last_command = None
+        self.serial = -1
+        self.permit = uuid.uuid4().hex
+        self.clear_guided_entry()
+        self.last_reason = 'Secuencia completada; manteniendo objetivo final en GUIDED'
+        return True
+
+    def completed_hold_health(self):
+        """Check the navigation needed by final hold, not DVL diagnostics."""
+        reasons = [
+            'Sin datos recientes para retención: ' + key
+            for key in ('position', 'velocity', 'yaw', 'pressure', 'ekf')
+            if self.get(key, min(0.8, self.navigation_sample_timeout)) is None
+        ]
+        flags = self.get('ekf', min(0.8, self.navigation_sample_timeout)) or 0
+        if (flags & 7) != 7 or not flags & (8 | 16) or flags & (128 | 1024 | 32768):
+            reasons.append('EKF no válido para retener posición')
+        return reasons
+
     def capture_hold_target(self):
         position = self.get('position', self.navigation_sample_timeout)
         yaw = self.get('yaw', self.navigation_sample_timeout)
@@ -614,35 +689,33 @@ class GuidedBridge:
             vertical_speed = abs(number(velocity[2]))
         except (ValueError, TypeError):
             return 'velocidad no válida'
-        if horizontal_speed > 0.10:
+        if horizontal_speed > GUIDED_ENTRY_MAX_SPEED_MPS:
             return f'ROV en movimiento horizontal: {horizontal_speed:.3f} m/s'
-        if vertical_speed > 0.10:
+        if vertical_speed > GUIDED_ENTRY_MAX_SPEED_MPS:
             return f'ROV en movimiento vertical: {vertical_speed:.3f} m/s'
         return None
 
     def confirm_guided_entry(self, now):
-        """Confirm GUIDED without replacing the pose latched in MANUAL."""
-        position = self.get('position', self.navigation_sample_timeout)
-        yaw = self.get('yaw', self.navigation_sample_timeout)
-        if self.hold_target is None or position is None or yaw is None or len(position) != 3:
-            self.clear_guided_entry()
-            self.last_reason = 'GUIDED abortado: posición o rumbo no disponibles'
-            self.abort_mode = 'MANUAL'
-            self.abort_until = now + 3.0
-            self.next_mode_request = 0.0
+        """Capture a fresh stationary pose only after GUIDED is confirmed."""
+        if not self.capture_hold_target():
+            self.abort_guided_entry('posición o rumbo no disponibles', now)
+            return False
+        fault = self.guided_request_fault()
+        if fault:
+            self.abort_guided_entry(fault, now)
             return False
         self.guided_request_at = None
         self.guided_settle_started = now
         self.guided_entry_reference = self.hold_target
         self.last_reason = (
-            'GUIDED confirmado; manteniendo pose previa de MANUAL ('
+            'GUIDED confirmado; pose actual capturada y retenida ('
             + self.hold_target_text()
             + ')'
         )
         return True
 
     def guided_entry_fault(self):
-        """Detect an unsafe vertical transient while GUIDED is idle."""
+        """Detect runaway motion, while allowing normal small hold corrections."""
         if self.guided_entry_reference is None:
             return None
         position = self.get('position', self.navigation_sample_timeout)
@@ -670,20 +743,24 @@ class GuidedBridge:
             )
         except (ValueError, TypeError):
             return 'Telemetría de transición no válida'
-        if horizontal_error > 0.10:
+        if horizontal_error > GUIDED_HOLD_MAX_HORIZONTAL_ERROR_M:
             return f'Desviación horizontal durante entrada GUIDED: {horizontal_error:.3f} m'
-        if depth_error > 0.08:
+        if depth_error > GUIDED_HOLD_MAX_VERTICAL_ERROR_M:
             return f'Desviación vertical durante entrada GUIDED: {depth_error:.3f} m'
-        if yaw_error > math.radians(5.0):
+        if yaw_error > GUIDED_HOLD_MAX_YAW_ERROR_RAD:
             return f'Desviación de rumbo durante entrada GUIDED: {math.degrees(yaw_error):.1f}°'
-        if horizontal_speed > 0.15:
+        if horizontal_speed > GUIDED_ENTRY_MAX_SPEED_MPS:
             return f'Velocidad horizontal durante entrada GUIDED: {horizontal_speed:.3f} m/s'
-        if vertical_speed > 0.15:
+        if vertical_speed > GUIDED_ENTRY_MAX_SPEED_MPS:
             return f'Velocidad vertical durante entrada GUIDED: {vertical_speed:.3f} m/s'
         return None
 
     def abort_guided_entry(self, reason, now):
         self.clear_guided_entry()
+        # Never command the pose that caused the transition fault while the
+        # MANUAL fallback is still pending. Zero velocity is the only safe
+        # transient command after an entry abort.
+        self.hold_target = None
         self.last_reason = 'GUIDED abortado: ' + reason
         self.abort_mode = 'MANUAL'
         self.abort_until = now + 3.0
@@ -693,32 +770,8 @@ class GuidedBridge:
         if self.hold_target is None and not self.capture_hold_target():
             return False
         n, e, d, yaw = self.hold_target
-        # ArduSub accepts velocity-only and position-only target combinations.
-        # Mask 2048 enables position, velocity and acceleration simultaneously;
-        # that combination can be rejected, leaving the previous GUIDED yaw
-        # alive. First clear the previous motion with a valid zero-velocity /
-        # zero-yaw-rate target, then install the latched position and yaw.
-        #
-        # 1479: ignore XYZ position, acceleration and yaw; use zero velocity
-        #       and zero yaw rate.
-        self.b.master.mav.set_position_target_local_ned_send(
-            0,
-            self.b.target_system_id,
-            self.b.target_component_id,
-            1,
-            1479,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        )
+        # Stream one coherent position/yaw target. Repeated velocity-to-position
+        # alternation must not replace the reference on every hold cycle.
         # 2552: use XYZ position and yaw; ignore velocity, acceleration and
         #       yaw rate.
         self.b.master.mav.set_position_target_local_ned_send(
@@ -744,27 +797,31 @@ class GuidedBridge:
     def send_stop(self):
         if not self.send_hold():
             # Without a trustworthy pose, command zero velocity and zero yaw rate.
-            self.b.master.mav.set_position_target_local_ned_send(
-                0,
-                self.b.target_system_id,
-                self.b.target_component_id,
-                1,
-                1479,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-            )
+            self.send_zero_velocity()
+
+    def send_zero_velocity(self):
+        self.b.master.mav.set_position_target_local_ned_send(
+            0,
+            self.b.target_system_id,
+            self.b.target_component_id,
+            1,
+            1479,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        )
 
     def stop(self, reason, fallback=None):
-        owned = self.owner is not None
+        owned = self.owner is not None or self.holding_completed_goal
+        self.holding_completed_goal = False
         self.owner = None
         self.owner_limits = None
         self.last_command = None
@@ -840,29 +897,58 @@ class GuidedBridge:
                     and not self.owner
                     and not self.abort_mode
                 ):
-                    # A mode change made outside the sequence UI must not reuse
-                    # a target from an earlier GUIDED session either.
-                    self.hold_target = None
-                    if self.capture_hold_target():
-                        self.confirm_guided_entry(now)
+                    # An external mode change bypasses the neutral-command
+                    # handshake. Reject it instead of letting ArduSub act on a
+                    # target retained from an earlier GUIDED session.
+                    self.abort_guided_entry(
+                        'entrada externa sin protocolo seguro; usa la interfaz de secuencias',
+                        now,
+                    )
+                    self.send_zero_velocity()
+                    self.set_mode('MANUAL')
+                    self.next_mode_request = now + 0.5
             if self.guided_request_at is not None:
-                # Repeat the pre-entry target even before the mode heartbeat.
-                # The packet immediately following SET_MODE is then already a
-                # zero-velocity hold for this entry, never an earlier target.
-                if not self.send_hold():
-                    self.abort_guided_entry('pose MANUAL retenida no disponible', now)
+                # While the mode heartbeat is pending, stream only a neutral
+                # velocity target. No position from this or an earlier entry is
+                # allowed to become active during the transition.
+                self.send_zero_velocity()
+                self.send_zero_velocity()
+                # The MANUAL pose is only a diagnostic reference. Small drift
+                # is expected in water and must not force repeated attempts;
+                # only an unsafe measured speed blocks the transition. The
+                # actual hold pose is recaptured after GUIDED is confirmed.
+                fault = self.guided_request_fault()
+                if fault:
+                    self.abort_guided_entry(fault, now)
+                    self.send_zero_velocity()
+                    self.set_mode('MANUAL')
+                    self.next_mode_request = now + 0.5
                 elif b.mode == 'GUIDED':
-                    self.confirm_guided_entry(now)
+                    if self.confirm_guided_entry(now):
+                        # Start one coherent position/yaw hold from the fresh
+                        # post-confirmation pose. Do not alternate it with a
+                        # velocity target after this point.
+                        self.send_hold()
+                        self.send_hold()
+                    else:
+                        self.send_zero_velocity()
+                        self.set_mode('MANUAL')
+                        self.next_mode_request = now + 0.5
                 elif now - self.guided_request_at > 2.0:
-                    self.clear_guided_entry()
-                    self.hold_target = None
-                    self.last_reason = 'GUIDED no confirmado dentro de 2 s'
+                    self.abort_guided_entry('GUIDED no confirmado dentro de 2 s', now)
+                    self.send_zero_velocity()
+                    self.set_mode('MANUAL')
+                    self.next_mode_request = now + 0.5
             if self.owner:
                 reasons = self.output_reasons()
                 if not b.armed or b.mode != 'GUIDED':
                     reasons.append('El ROV dejó GUIDED o se desarmó')
                 if now - self.last_command_at > 0.4:
                     reasons.append('Ejecutor sin órdenes recientes')
+                if reasons:
+                    self.stop('; '.join(reasons), 'MANUAL' if b.deadman else self.holding_mode())
+            elif self.holding_completed_goal:
+                reasons = self.output_reasons() + self.completed_hold_health()
                 if reasons:
                     self.stop('; '.join(reasons), 'MANUAL' if b.deadman else self.holding_mode())
             heartbeat_fresh = (
@@ -875,7 +961,10 @@ class GuidedBridge:
                 if self.owner:
                     self.send(self.last_command)
                 elif self.abort_mode:
-                    self.send_stop()
+                    # During a fallback, never pull the vehicle back toward a
+                    # position target. Brake translation/yaw until MANUAL (or
+                    # the selected fallback mode) is confirmed.
+                    self.send_zero_velocity()
                     if now >= self.next_mode_request:
                         self.set_mode(self.abort_mode)
                         self.next_mode_request = now + 0.5
@@ -927,6 +1016,8 @@ class GuidedBridge:
                 'guided_entry_pending': self.guided_request_at is not None,
                 'guided_settling': self.guided_settle_started is not None,
                 'hold_target': list(self.hold_target) if self.hold_target is not None else None,
+                'holding_completed_goal': self.holding_completed_goal,
+                'controller_revision': 'guided_precision_v2',
                 'dvl_input': self.dvl_input,
                 'samples': {
                     k: self.get(k, 1.5 if k == 'dvl' else self.navigation_sample_timeout)
@@ -941,7 +1032,10 @@ class GuidedBridge:
             b.get_logger().error(self.last_reason)
 
     def shutdown(self):
-        if self.enabled and self.b.connected and self.owner and self.b.mode == 'GUIDED':
+        if (
+            self.enabled and self.b.connected
+            and (self.owner or self.holding_completed_goal) and self.b.mode == 'GUIDED'
+        ):
             self.send_stop()
             self.set_mode(self.holding_mode())
         self.dvl_rest_stop.set()

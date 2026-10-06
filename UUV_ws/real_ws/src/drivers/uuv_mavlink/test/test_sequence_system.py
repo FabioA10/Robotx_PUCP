@@ -243,6 +243,82 @@ class TestSequenceCore(unittest.TestCase):
         parsed = Sequence(limits).validate(Pose(0, 0, 0, 0), steps)
         self.assertEqual(parsed, steps)
 
+    def test_low_requested_speed_is_preserved_when_vehicle_responds(self):
+        core = Sequence(Limits(recovery_delay=1.0))
+        origin = Pose(0, 0, 0.2, 0)
+        core.start(
+            origin,
+            [{'kind': 'advance', 'value': 0.2, 'speed': 0.005}],
+            0,
+        )
+        command = None
+        for tick in range(1, 61):
+            pose = Pose((tick - 1) * 0.005 * 0.05, 0, 0.2, 0)
+            command = core.update(pose, tick * 0.05, velocity=[0.005, 0, 0])
+        self.assertFalse(core.recovery_active)
+        self.assertLessEqual(abs(command[0]), 0.0050001)
+
+    def test_stalled_low_speed_step_escalates_after_configured_delay(self):
+        core = Sequence(Limits(recovery_delay=1.0))
+        origin = Pose(0, 0, 0.2, 0)
+        core.start(
+            origin,
+            [{'kind': 'lateral', 'value': 0.2, 'speed': 0.005}],
+            0,
+        )
+        commands = []
+        for tick in range(1, 24):
+            commands.append(
+                core.update(origin, tick * 0.05, velocity=[0, 0, 0])
+            )
+        self.assertAlmostEqual(commands[18][1], 0.005)
+        self.assertTrue(core.recovery_active)
+        self.assertIn('lenta', core.recovery_reason)
+        self.assertGreater(commands[-1][1], 0.005)
+        self.assertLessEqual(math.hypot(commands[-1][0], commands[-1][1]), 0.080001)
+
+    def test_velocity_damping_brakes_before_crossing_target(self):
+        core = Sequence()
+        origin = Pose(0, 0, 0.2, 0)
+        core.start(
+            origin,
+            [{'kind': 'advance', 'value': 0.2, 'speed': 0.05}],
+            0,
+        )
+        command = None
+        for tick in range(1, 11):
+            command = core.update(
+                Pose(0.17, 0, 0.2, 0),
+                tick * 0.05,
+                velocity=[0.04, 0, 0],
+            )
+        self.assertLess(command[0], 0.0)
+        self.assertLess(0.17, core.goal.n)
+
+    def test_large_hold_drift_uses_recovery_and_vector_speed_cap(self):
+        core = Sequence()
+        origin = Pose(0, 0, 0.2, 0)
+        core.start(origin, [('wait', 2)], 0)
+        command = core.update(
+            Pose(0.10, 0.10, 0.2, 0),
+            0.05,
+            velocity=[0, 0, 0],
+        )
+        self.assertTrue(core.recovery_active)
+        self.assertIn('fuera del umbral', core.recovery_reason)
+        self.assertLessEqual(math.hypot(command[0], command[1]), 0.080001)
+
+    def test_adaptive_limit_relationships_are_rejected(self):
+        invalid = (
+            {'recovery_radius': 0.03},
+            {'horizontal_speed': 0.05, 'recovery_speed': 0.10},
+            {'recovery_speed': 0.02, 'recovery_min_speed': 0.03},
+            {'response_ratio': 1.1},
+        )
+        for changes in invalid:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                Limits(**changes)
+
 
 class TestGuidedTransport(unittest.TestCase):
     def setUp(self):
@@ -325,7 +401,7 @@ class TestGuidedTransport(unittest.TestCase):
         self.assertEqual(packets[-1][1:5], (1, 1, 1, 2503))
         self.assertEqual(packets[-1][8:11], (0.1, 0.0, 0.0))
 
-    def test_guided_entry_streams_and_keeps_pose_latched_in_manual(self):
+    def test_guided_entry_brakes_then_holds_fresh_confirmed_pose(self):
         self.b.mode = 'MANUAL'
         self.g.tick()
         self.g.put('position', [1.2, -0.4, 0.7])
@@ -335,19 +411,30 @@ class TestGuidedTransport(unittest.TestCase):
             [1 for n, _ in self.b.master.mav.sent if n == 'set_position_target_local_ned_send']
         )
         self.g.action(self.action('guided'))
-        self.assertEqual(self.g.hold_target, (1.2, -0.4, 0.7, 0.3))
+        self.assertIsNone(self.g.hold_target)
+        self.assertEqual(self.g.guided_entry_reference, (1.2, -0.4, 0.7, 0.3))
         after = len(
             [1 for n, _ in self.b.master.mav.sent if n == 'set_position_target_local_ned_send']
         )
-        self.assertEqual(after, before + 2)
+        self.assertEqual(after, before + 4)
         self.assertEqual(
-            [name for name, _ in self.b.master.mav.sent[-3:]],
+            [name for name, _ in self.b.master.mav.sent[-5:]],
             [
+                'set_position_target_local_ned_send',
+                'set_position_target_local_ned_send',
                 'set_mode_send',
                 'set_position_target_local_ned_send',
                 'set_position_target_local_ned_send',
             ],
         )
+        transition_packets = [
+            args
+            for name, args in self.b.master.mav.sent
+            if name == 'set_position_target_local_ned_send'
+        ][before:after]
+        self.assertTrue(transition_packets)
+        self.assertTrue(all(packet[4] == 1479 for packet in transition_packets))
+        self.assertTrue(all(packet[8:11] == (0.0, 0.0, 0.0) for packet in transition_packets))
         mode_packets = [a for n, a in self.b.master.mav.sent if n == 'set_mode_send']
         self.assertEqual(mode_packets[-1], (1, 1, 4))
 
@@ -356,21 +443,26 @@ class TestGuidedTransport(unittest.TestCase):
             [1 for n, _ in self.b.master.mav.sent if n == 'set_position_target_local_ned_send']
         )
         self.assertEqual(repeated, after + 2)
+        pending_packets = [
+            args
+            for name, args in self.b.master.mav.sent
+            if name == 'set_position_target_local_ned_send'
+        ][after:repeated]
+        self.assertTrue(all(packet[4] == 1479 for packet in pending_packets))
 
         self.g.put('position', [1.25, -0.45, 0.72])
         self.g.put('velocity', [0, 0, 0])
         self.g.put('yaw', 0.32)
         self.b.mode = 'GUIDED'
         self.g.tick()
+        self.assertEqual(self.g.hold_target, (1.25, -0.45, 0.72, 0.32))
         packets = [
             a for n, a in self.b.master.mav.sent if n == 'set_position_target_local_ned_send'
         ]
-        self.assertEqual(packets[-2][1:5], (1, 1, 1, 1479))
-        self.assertEqual(packets[-2][8:11], (0.0, 0.0, 0.0))
         self.assertEqual(packets[-1][1:5], (1, 1, 1, 2552))
-        self.assertEqual(packets[-1][5:8], (1.2, -0.4, 0.7))
+        self.assertEqual(packets[-1][5:8], (1.25, -0.45, 0.72))
         self.assertEqual(packets[-1][8:14], (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertAlmostEqual(packets[-1][14], 0.3)
+        self.assertAlmostEqual(packets[-1][14], 0.32)
         self.assertIn('Estabilizando entrada a GUIDED', self.g.output_reasons())
 
         self.now += 5.01
@@ -389,13 +481,13 @@ class TestGuidedTransport(unittest.TestCase):
         self.g.put('yaw', 0.1)
         self.g.tick()
         self.g.action(self.action('guided'))
-        self.assertEqual(self.g.hold_target, (1, 2, 0.3, 0.1))
+        self.assertIsNone(self.g.hold_target)
         self.b.mode = 'GUIDED'
-        self.g.put('position', [1.1, 2.1, 0.31])
+        self.g.put('position', [1.01, 2.01, 0.31])
         self.g.put('velocity', [0, 0, 0])
         self.g.put('yaw', 0.11)
         self.g.tick()
-        self.assertEqual(self.g.hold_target, (1, 2, 0.3, 0.1))
+        self.assertEqual(self.g.hold_target, (1.01, 2.01, 0.31, 0.11))
 
         self.b.mode = 'MANUAL'
         self.g.tick()
@@ -411,23 +503,23 @@ class TestGuidedTransport(unittest.TestCase):
             len(
                 [1 for n, _ in self.b.master.mav.sent if n == 'set_position_target_local_ned_send']
             ),
-            before + 2,
+            before + 4,
         )
         self.b.mode = 'GUIDED'
-        self.g.put('position', [4.1, 5.1, 0.62])
+        self.g.put('position', [4.01, 5.01, 0.62])
         self.g.put('velocity', [0, 0, 0])
         self.g.put('yaw', 0.42)
         self.g.tick()
-        self.assertEqual(self.g.hold_target, (4, 5, 0.6, 0.4))
+        self.assertEqual(self.g.hold_target, (4.01, 5.01, 0.62, 0.42))
         packets = [
             a for n, a in self.b.master.mav.sent if n == 'set_position_target_local_ned_send'
         ]
-        self.assertEqual(packets[-1][5:8], (4, 5, 0.6))
+        self.assertEqual(packets[-1][5:8], (4.01, 5.01, 0.62))
 
     def test_guided_entry_rejects_vehicle_already_moving(self):
         self.b.mode = 'MANUAL'
         self.g.tick()
-        for velocity, text in [([0.11, 0, 0], 'horizontal'), ([0, 0, -0.11], 'vertical')]:
+        for velocity, text in [([0.151, 0, 0], 'horizontal'), ([0, 0, -0.151], 'vertical')]:
             self.g.put('velocity', velocity)
             before = len([1 for name, _ in self.b.master.mav.sent if name == 'set_mode_send'])
             self.g.action(self.action('guided'))
@@ -435,6 +527,26 @@ class TestGuidedTransport(unittest.TestCase):
             self.assertEqual(after, before)
             self.assertIn('movimiento ' + text, self.g.last_reason)
             self.g.tick()
+
+    def test_guided_entry_allows_small_water_drift_and_recaptures_pose(self):
+        self.b.mode = 'MANUAL'
+        self.g.tick()
+        self.g.put('velocity', [0.12, 0, 0])
+        self.g.action(self.action('guided'))
+        self.assertIsNotNone(self.g.guided_request_at)
+
+        self.g.put('position', [0.11, 0.02, 0.03])
+        self.g.put('velocity', [0.02, 0, 0])
+        self.g.put('yaw', math.radians(3))
+        self.g.tick()
+        self.assertIsNone(self.g.abort_mode)
+
+        self.b.mode = 'GUIDED'
+        self.g.tick()
+        self.assertEqual(
+            self.g.hold_target,
+            (0.11, 0.02, 0.03, math.radians(3)),
+        )
 
     def test_guided_entry_vertical_transient_returns_to_manual(self):
         self.b.mode = 'MANUAL'
@@ -464,7 +576,7 @@ class TestGuidedTransport(unittest.TestCase):
         self.assertIsNotNone(self.g.guided_entry_reference)
         self.assertIn('listo para iniciar', self.g.last_reason)
 
-        self.g.put('position', [0, 0, 0.081])
+        self.g.put('position', [0, 0, 0.121])
         self.g.put('velocity', [0, 0, 0.01])
         self.g.tick()
         self.assertEqual(self.g.abort_mode, 'MANUAL')
@@ -472,9 +584,9 @@ class TestGuidedTransport(unittest.TestCase):
 
     def test_guided_entry_guards_horizontal_position_speed_and_yaw(self):
         cases = [
-            ([0.101, 0, 0], [0, 0, 0], 0, 'Desviación horizontal'),
+            ([0.201, 0, 0], [0, 0, 0], 0, 'Desviación horizontal'),
             ([0, 0, 0], [0.151, 0, 0], 0, 'Velocidad horizontal'),
-            ([0, 0, 0], [0, 0, 0], math.radians(5.1), 'Desviación de rumbo'),
+            ([0, 0, 0], [0, 0, 0], math.radians(15.1), 'Desviación de rumbo'),
         ]
         for position, velocity, yaw, text in cases:
             self.g.guided_entry_reference = (0, 0, 0, 0)
@@ -483,7 +595,7 @@ class TestGuidedTransport(unittest.TestCase):
             self.g.put('yaw', yaw)
             self.assertIn(text, self.g.guided_entry_fault())
 
-    def test_external_second_guided_entry_recaptures_instead_of_reusing(self):
+    def test_external_guided_entry_is_rejected_without_reusing_target(self):
         self.g.hold_target = (9, 9, 9, 0.9)
         self.b.mode = 'MANUAL'
         self.g.tick()
@@ -492,11 +604,16 @@ class TestGuidedTransport(unittest.TestCase):
         self.g.put('yaw', 0.2)
         self.b.mode = 'GUIDED'
         self.g.tick()
-        self.assertEqual(self.g.hold_target, (2, 3, 0.4, 0.2))
+        self.assertIsNone(self.g.hold_target)
+        self.assertEqual(self.g.abort_mode, 'MANUAL')
+        self.assertIn('entrada externa sin protocolo seguro', self.g.last_reason)
         packets = [
             a for n, a in self.b.master.mav.sent if n == 'set_position_target_local_ned_send'
         ]
-        self.assertEqual(packets[-1][5:8], (2, 3, 0.4))
+        self.assertEqual(packets[-1][1:5], (1, 1, 1, 1479))
+        self.assertEqual(packets[-1][8:11], (0.0, 0.0, 0.0))
+        mode_packets = [a for n, a in self.b.master.mav.sent if n == 'set_mode_send']
+        self.assertEqual(mode_packets[-1], (1, 1, 19))
 
     def test_unconfirmed_guided_request_expires_without_stale_target(self):
         self.b.mode = 'MANUAL'
@@ -831,6 +948,13 @@ class TestExecutor(unittest.TestCase):
             'max_horizontal_speed': 0.2,
             'max_vertical_speed': 0.1,
             'max_yaw_speed_deg': 10,
+            'xy_tolerance': 0.03,
+            'recovery_radius': 0.08,
+            'recovery_speed': 0.08,
+            'recovery_min_speed': 0.020,
+            'recovery_delay': 2.0,
+            'position_gain': 0.80,
+            'velocity_damping': 1.20,
             'steps': [['advance', 0.5]],
         }
         self.action_counter += 1
@@ -896,6 +1020,38 @@ class TestExecutor(unittest.TestCase):
         self.assertAlmostEqual(self.ex.core.limits.vertical_speed, 0.4)
         self.assertAlmostEqual(self.ex.core.limits.yaw_speed, math.radians(45))
 
+    def test_prepare_accepts_adaptive_precision_controls(self):
+        self.req(
+            'prepare',
+            xy_tolerance=0.025,
+            recovery_radius=0.075,
+            recovery_speed=0.12,
+            recovery_min_speed=0.03,
+            recovery_delay=1.5,
+            position_gain=0.9,
+            velocity_damping=1.1,
+        )
+        limits = self.ex.core.limits
+        self.assertIsNotNone(self.ex.validated, self.ex.note)
+        self.assertAlmostEqual(limits.xy_tolerance, 0.025)
+        self.assertAlmostEqual(limits.recovery_radius, 0.075)
+        self.assertAlmostEqual(limits.recovery_speed, 0.12)
+        self.assertAlmostEqual(limits.recovery_min_speed, 0.03)
+        self.assertAlmostEqual(limits.recovery_delay, 1.5)
+        self.assertAlmostEqual(limits.position_gain, 0.9)
+        self.assertAlmostEqual(limits.velocity_damping, 1.1)
+
+    def test_prepare_rejects_incoherent_recovery_limits(self):
+        for changes in (
+            {'recovery_radius': 0.03},
+            {'recovery_speed': 0.21},
+            {'recovery_speed': 0.02, 'recovery_min_speed': 0.03},
+        ):
+            self.req('prepare', **changes)
+            self.assertIsNone(self.ex.validated, changes)
+            for _ in range(45):
+                self.advance()
+
     def test_prepare_rejects_armed_mode_and_hard_health_fault(self):
         for changes in (
             {'armed': True},
@@ -945,6 +1101,53 @@ class TestExecutor(unittest.TestCase):
         self.f['samples']['position'][2] = 2
         self.advance()
         self.assertIsNone(self.ex.reference)
+
+    def test_execute_accepts_repositioning_and_starts_from_current_pose(self):
+        self.req('prepare')
+        self.assertIsNotNone(self.ex.validated, self.ex.note)
+        self.f['samples']['position'][0] = 0.60
+        self.f.update(armed=True, mode='GUIDED', enabled=True, blockers=[])
+        self.advance()
+        phase = self.ex.phase_status(self.now, self.ex.pose(), '')
+        self.assertEqual(phase['title'], 'LISTO PARA INICIAR')
+        self.ui()
+        self.req('execute')
+        self.assertEqual(self.ex.core.state, 'RUNNING', self.ex.note)
+        self.assertAlmostEqual(self.ex.core.goal.n, 1.1)
+        self.assertAlmostEqual(self.ex.home.n, 0.0)
+
+    def test_small_pre_execute_drift_uses_current_reference(self):
+        self.req('prepare')
+        self.assertIsNotNone(self.ex.validated, self.ex.note)
+        self.f['samples']['position'] = [0.05, 0, 0.04]
+        self.f['samples']['pressure'] += 1000 * 9.80665 * 0.04 / 100
+        self.f.update(armed=True, mode='GUIDED', enabled=True, blockers=[])
+        self.advance()
+        self.ui()
+        self.req('execute')
+        self.assertEqual(self.ex.core.state, 'RUNNING', self.ex.note)
+        self.assertAlmostEqual(self.ex.core.goal.n, 0.55)
+        self.assertAlmostEqual(self.ex.core.goal.depth, 0.24)
+
+    def test_repositioned_plan_still_respects_original_home_radius(self):
+        self.req('prepare')
+        self.f['samples']['position'][0] = 1.8
+        self.f.update(armed=True, mode='GUIDED', enabled=True, blockers=[])
+        self.advance()
+        self.ui()
+        self.req('execute')
+        self.assertNotEqual(self.ex.core.state, 'RUNNING')
+        self.assertAlmostEqual(self.ex.home.n, 0.0)
+
+    def test_guided_request_after_repositioning_preserves_plan(self):
+        self.req('prepare')
+        saved = self.ex.validated
+        self.f['samples']['position'][0] = 0.6
+        self.f.update(armed=True, mode='MANUAL', enabled=True, blockers=[])
+        self.advance()
+        self.req('guided')
+        self.assertIs(self.ex.validated, saved)
+        self.assertIn('GUIDED solicitado', self.ex.note)
 
     def test_ui_loss_cancels_without_auto_resume(self):
         self.start()
@@ -1019,6 +1222,45 @@ class TestExecutor(unittest.TestCase):
         phase = self.ex.phase_status(self.now + 0.05, pose, '')
         self.assertEqual(phase['code'], 'ESPERA')
         self.assertGreater(phase['remaining_s'], 2.9)
+
+    def test_stabilizing_phase_reports_blocking_tolerances(self):
+        pose = Pose(0, 0, 0.2, 0)
+        core = Sequence()
+        core.start(pose, [('turn', 10)], self.now)
+        core.errors = (0.05, 0.01, 3.0)
+        core.measured_speed = 0.04
+        self.ex.core = core
+        self.ex.total = 1
+        phase = self.ex.phase_status(self.now + 0.05, pose, '')
+        self.assertEqual(phase['code'], 'ESTABILIZANDO')
+        self.assertIn('XY 0.05>0.03 m', phase['detail'])
+        self.assertIn('vel. 0.04>0.03 m/s', phase['detail'])
+
+    def test_stabilizing_phase_reports_confirmation_time(self):
+        pose = Pose(0, 0, 0.2, 0)
+        core = Sequence()
+        core.start(pose, [('turn', 10)], self.now)
+        core.errors = (0.01, 0.01, 3.0)
+        core.measured_speed = 0.01
+        core.inside_since = self.now
+        self.ex.core = core
+        self.ex.total = 1
+        phase = self.ex.phase_status(self.now + 0.25, pose, '')
+        self.assertEqual(phase['code'], 'ESTABILIZANDO')
+        self.assertIn('confirmando 0.8 s', phase['detail'])
+
+    def test_stabilizing_phase_handles_initial_check_without_timestamp(self):
+        pose = Pose(0, 0, 0.2, 0)
+        core = Sequence()
+        core.start(pose, [('turn', 10)], self.now)
+        core.errors = (0.01, 0.01, 3.0)
+        core.measured_speed = 0.01
+        self.assertIsNone(core.inside_since)
+        self.ex.core = core
+        self.ex.total = 1
+        phase = self.ex.phase_status(self.now + 0.05, pose, '')
+        self.assertEqual(phase['code'], 'ESTABILIZANDO')
+        self.assertIn('verificando tolerancias', phase['detail'])
 
     def test_edit_after_validation_and_duplicate_execute_are_rejected(self):
         self.req('surface')

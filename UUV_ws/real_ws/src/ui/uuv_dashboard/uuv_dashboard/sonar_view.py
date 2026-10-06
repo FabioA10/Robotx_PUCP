@@ -127,7 +127,7 @@ class SonarView(QWidget):
         self.persistence.setValue(1.5)
         controls.addWidget(self.persistence)
 
-        controls.addWidget(QLabel('Intensidad mínima'))
+        controls.addWidget(QLabel('Umbral visual'))
         self.min_intensity = QDoubleSpinBox()
         self.min_intensity.setRange(0.0, 255.0)
         self.min_intensity.setDecimals(0)
@@ -136,10 +136,12 @@ class SonarView(QWidget):
         layout.addLayout(controls)
 
         self.status = QLabel('Ping360: esperando publicador…')
+        self.status.setObjectName('TelemetryValue')
         self.status.setWordWrap(True)
+        self.status.setMaximumHeight(48)
         layout.addWidget(self.status)
         self.canvas = SonarCanvas(self)
-        layout.addWidget(self.canvas)
+        layout.addWidget(self.canvas, 1)
 
         self.source.currentIndexChanged.connect(self.refresh)
         self.range_m.valueChanged.connect(self.refresh)

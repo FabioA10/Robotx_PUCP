@@ -21,6 +21,9 @@ class SequenceExecutor(Node):
         self.declare_parameter('water_density', 1000.0)
         self.declare_parameter('event_log_enabled', False)
         self.declare_parameter('event_log_directory', '')
+        self.declare_parameter('sequence_xy_tolerance_m', 0.03)
+        self.declare_parameter('sequence_depth_tolerance_m', 0.02)
+        self.declare_parameter('sequence_settle_speed_mps', 0.03)
         self.density = float(self.get_parameter('water_density').value)
         if not 950 <= self.density <= 1050:
             raise ValueError('water_density fuera del rango 950–1050 kg/m³')
@@ -49,6 +52,7 @@ class SequenceExecutor(Node):
         self.event_log = None
         self.event_log_path = None
         self.last_event_snapshot = None
+        self.next_telemetry_log = 0.0
         if bool(self.get_parameter('event_log_enabled').value):
             configured = str(self.get_parameter('event_log_directory').value).strip()
             directory = (
@@ -70,7 +74,10 @@ class SequenceExecutor(Node):
         self.create_subscription(String, '/uuv/sequence/request', self.on_request, 10)
         self.create_subscription(String, '/uuv/sequence/ui_alive', self.on_ui, 1)
         self.timer = self.create_timer(0.05, self.tick)
-        self.record_event('INFO', 'INICIO', 'Ejecutor de secuencias iniciado')
+        self.record_event(
+            'INFO', 'INICIO', 'Ejecutor de secuencias iniciado',
+            controller_revision='guided_precision_v2',
+        )
 
     def record_event(self, level, event, detail, **fields):
         """Append one durable, uploadable event without flooding the file."""
@@ -96,18 +103,46 @@ class SequenceExecutor(Node):
         msg.data = json.dumps(data, allow_nan=False)
         pub.publish(msg)
 
-    def bridge_action(self, action):
+    def bridge_action(self, action, hold_target=None):
         if self.feedback is not None:
             f = self.feedback
+            packet = {
+                'action': action,
+                'session': f['session'],
+                'permit': f['permit'],
+                'ticket': f['ticket'],
+            }
+            if hold_target is not None:
+                packet['hold_target'] = hold_target
             self.publish(
                 self.action_pub,
-                {
-                    'action': action,
-                    'session': f['session'],
-                    'permit': f['permit'],
-                    'ticket': f['ticket'],
-                },
+                packet,
             )
+
+    def completion_hold_target(self, current):
+        goal = self.core.completed_goal
+        if goal is None or current is None or self.feedback is None:
+            return None
+        # The core uses pressure-referenced absolute depth. MAVLink uses the
+        # EKF local NED origin: add only the remaining depth error to current z.
+        z = number(self.feedback['samples']['position'][2])
+        return [goal.n, goal.e, z + goal.depth - current.depth, goal.yaw]
+
+    def command_reference(self, current):
+        """Carry a healthy completed hold into a separately submitted plan."""
+        f = self.feedback or {}
+        if not f.get('holding_completed_goal'):
+            return current
+        target = f.get('hold_target')
+        if not isinstance(target, (list, tuple)) or len(target) != 4:
+            raise ValueError('Objetivo retenido no disponible; recuperar navegación')
+        n, e, z, yaw = (number(v) for v in target)
+        measured_z = number(f['samples']['position'][2])
+        depth = (
+            self.core.completed_goal.depth if self.core.completed_goal is not None
+            else current.depth + z - measured_z
+        )
+        return Pose(n, e, depth, yaw)
 
     def clear_references(self, reason):
         self.reference = None
@@ -293,18 +328,62 @@ class SequenceExecutor(Node):
             raise ValueError(self.note)
         return Pose(s['position'][0], s['position'][1], depth, s['yaw'])
 
-    @staticmethod
-    def requested_limits(packet):
+    def requested_limits(self, packet):
         maximum = number(packet['max_depth'])
         radius = number(packet['radius'])
         if not 0.2 <= maximum <= 3 or not 0.5 <= radius <= 5:
             raise ValueError('Límites: profundidad 0.2–3 m, radio 0.5–5 m')
+        horizontal = number(packet['max_horizontal_speed'])
+        vertical = number(packet['max_vertical_speed'])
+        yaw_deg = number(packet['max_yaw_speed_deg'])
+        if not 0.001 <= horizontal <= 1.0:
+            raise ValueError('Máximo horizontal permitido: 0.001–1.0 m/s')
+        if not 0.001 <= vertical <= 0.5:
+            raise ValueError('Máximo vertical permitido: 0.001–0.5 m/s')
+        if not 0.001 <= yaw_deg <= 90:
+            raise ValueError('Máximo de giro permitido: 0.001–90 °/s')
+        xy = number(
+            packet.get('xy_tolerance', self.get_parameter('sequence_xy_tolerance_m').value)
+        )
+        depth = number(self.get_parameter('sequence_depth_tolerance_m').value)
+        settle = number(self.get_parameter('sequence_settle_speed_mps').value)
+        if not 0.01 <= xy <= 0.15 or not 0 < depth <= 0.15 or not 0 < settle <= 0.08:
+            raise ValueError('Tolerancias fuera del rango de retención permitido')
+        recovery_radius = number(packet.get('recovery_radius', max(0.08, xy + 0.01)))
+        recovery_speed = number(packet.get('recovery_speed', min(0.08, horizontal)))
+        recovery_min = number(packet.get('recovery_min_speed', min(0.020, recovery_speed)))
+        recovery_delay = number(packet.get('recovery_delay', 2.0))
+        position_gain = number(packet.get('position_gain', 0.80))
+        velocity_damping = number(packet.get('velocity_damping', 1.20))
+        if not xy + 0.005 <= recovery_radius <= min(0.50, radius):
+            raise ValueError(
+                'El umbral de recuperación debe superar la tolerancia XY y no exceder 0.50 m'
+            )
+        if not 0.001 <= recovery_min <= recovery_speed <= horizontal:
+            raise ValueError(
+                'Velocidades de recuperación: 0.001 ≤ impulso mínimo ≤ máximo ≤ límite horizontal'
+            )
+        if not 0.5 <= recovery_delay <= 10:
+            raise ValueError('La demora de refuerzo debe estar entre 0.5 y 10 s')
+        if not 0.10 <= position_gain <= 2.0:
+            raise ValueError('La ganancia de posición debe estar entre 0.10 y 2.0 1/s')
+        if not 0.05 <= velocity_damping <= 3.0:
+            raise ValueError('El frenado por velocidad debe estar entre 0.05 y 3.0 s')
         return Limits(
             max_depth=maximum,
             radius=radius,
-            horizontal_speed=number(packet['max_horizontal_speed']),
-            vertical_speed=number(packet['max_vertical_speed']),
-            yaw_speed=math.radians(number(packet['max_yaw_speed_deg'])),
+            horizontal_speed=horizontal,
+            vertical_speed=vertical,
+            yaw_speed=math.radians(yaw_deg),
+            xy_tolerance=xy,
+            depth_tolerance=depth,
+            settle_speed=settle,
+            position_gain=position_gain,
+            velocity_damping=velocity_damping,
+            recovery_radius=recovery_radius,
+            recovery_speed=recovery_speed,
+            recovery_min_speed=recovery_min,
+            recovery_delay=recovery_delay,
         )
 
     def on_request(self, msg):
@@ -400,7 +479,7 @@ class SequenceExecutor(Node):
                 self.validated = None
                 self.note = 'Home real guardado en esta sesión'
             elif action in ('validate', 'validate_home'):
-                pose = self.pose()
+                pose = self.command_reference(self.pose())
                 self.core.limits = self.requested_limits(p)
                 returning = action == 'validate_home'
                 if returning and self.home is None:
@@ -409,10 +488,10 @@ class SequenceExecutor(Node):
                 parsed = self.core.validate(pose, steps, self.home)
                 self.validated = {'steps': parsed, 'returning': returning, 'pose': pose}
                 self.note = (
-                    'Geometría validada. Ejecutar volverá a tomar la posición y rumbo actuales.'
+                    'Geometría validada; se conservará el objetivo retenido si sigue activo.'
                 )
             elif action == 'execute':
-                pose = self.pose()
+                pose = self.command_reference(self.pose())
                 if self.validated is None:
                     raise ValueError('Primero pulsa Validar secuencia o Validar regreso')
                 if self.feedback['blockers']:
@@ -425,19 +504,31 @@ class SequenceExecutor(Node):
                 # Require the same GUI list that was validated; edits cannot
                 # silently execute old work.
                 if not returning:
-                    current_plan = self.core.validate(pose, p.get('steps'), self.home)
+                    current_plan = self.core.validate(
+                        pose,
+                        p.get('steps'),
+                        self.home,
+                    )
                     if current_plan != self.validated['steps']:
                         raise ValueError('La lista cambió; vuelve a validar')
                 if self.requested_limits(p) != self.core.limits:
                     raise ValueError('Los límites cambiaron; vuelve a validar')
-                steps = return_steps(pose, self.home) if returning else self.validated['steps']
-                self.core.start(pose, steps, time.monotonic(), self.home, returning)
+                steps = (
+                    return_steps(pose, self.home) if returning else self.validated['steps']
+                )
+                self.core.start(
+                    pose,
+                    steps,
+                    time.monotonic(),
+                    self.home,
+                    returning,
+                )
                 self.total = len(steps)
                 self.run = uuid.uuid4().hex
                 self.run_permit = self.feedback['permit']
                 self.command_serial = 0
                 self.last_output_command = (0.0, 0.0, 0.0, pose.yaw)
-                self.note = 'Ejecución iniciada desde la referencia actual'
+                self.note = 'Ejecución iniciada desde la referencia actual; Home conservado'
                 self.record_event(
                     'INFO',
                     'EJECUCION_INICIADA',
@@ -479,12 +570,20 @@ class SequenceExecutor(Node):
             else:
                 velocity = self.feedback['samples'].get('velocity')
                 measured_speed = math.sqrt(sum(v * v for v in velocity)) if velocity else 0.0
-                command = self.core.update(current, now, speed=measured_speed)
+                command = self.core.update(
+                    current,
+                    now,
+                    speed=measured_speed,
+                    velocity=velocity,
+                )
                 if command is None or self.core.state != 'RUNNING':
-                    self.bridge_action('complete' if self.core.state == 'COMPLETED' else 'cancel')
+                    completed = self.core.state == 'COMPLETED'
+                    target = self.completion_hold_target(current) if completed else None
+                    self.bridge_action('complete' if completed else 'cancel', target)
                     self.note = self.core.reason
                     self.validated = None
                     self.run = None
+                    self.last_output_command = None
                 else:
                     self.last_output_command = command
                     f = self.feedback
@@ -508,6 +607,30 @@ class SequenceExecutor(Node):
         token = uuid.uuid4().hex
         self.tickets.append((token, now))
         f = self.feedback if self.feedback and now - self.feedback_at < 0.35 else {}
+        if (
+            self.event_log is not None and now >= self.next_telemetry_log
+            and (self.core.state == 'RUNNING' or f.get('holding_completed_goal'))
+        ):
+            self.next_telemetry_log = now + 0.1
+            target = self.core.goal or self.core.completed_goal
+            self.record_event(
+                'INFO', 'TELEMETRIA_CONTROL', 'Posición, objetivo y orden de control',
+                state=self.core.state,
+                step=self.core.index + 1 if self.core.state == 'RUNNING' else 0,
+                pose=vars(current) if current else None,
+                goal=vars(target) if target else None,
+                command=self.last_output_command if self.core.state == 'RUNNING' else None,
+                velocity=f.get('samples', {}).get('velocity'),
+                position_ned=f.get('samples', {}).get('position'),
+                mode=f.get('mode'),
+                diagnostics=f.get('diagnostics', []),
+                hold_target=f.get('hold_target'),
+                holding_completed_goal=f.get('holding_completed_goal', False),
+                control_mode=self.core.control_mode,
+                recovery_reason=self.core.recovery_reason,
+                filtered_velocity=self.core.filtered_velocity,
+                command_debug=self.core.command_debug,
+            )
         goal = None if self.core.timed else self.core.goal
         timeout_left = None
         if self.core.state == 'RUNNING':
@@ -554,6 +677,17 @@ class SequenceExecutor(Node):
                 'pose': vars(current) if current else None,
                 'validated': self.validated is not None,
                 'prepared_by': self.prepared_by if self.validated is not None else None,
+                'prepared_pose': (
+                    vars(self.validated['pose']) if self.validated is not None else None
+                ),
+                'prepared_drift': (
+                    math.hypot(
+                        current.n - self.validated['pose'].n,
+                        current.e - self.validated['pose'].e,
+                    )
+                    if self.validated is not None and current is not None
+                    else None
+                ),
                 'returning': self.validated['returning'] if self.validated else False,
                 'step': self.core.index + 1 if self.core.state == 'RUNNING' else 0,
                 'total': self.total,
@@ -562,8 +696,18 @@ class SequenceExecutor(Node):
                     'horizontal_speed': self.core.limits.horizontal_speed,
                     'vertical_speed': self.core.limits.vertical_speed,
                     'yaw_speed': self.core.limits.yaw_speed,
+                    'xy_tolerance': self.core.limits.xy_tolerance,
+                    'recovery_radius': self.core.limits.recovery_radius,
+                    'recovery_speed': self.core.limits.recovery_speed,
+                    'recovery_min_speed': self.core.limits.recovery_min_speed,
+                    'recovery_delay': self.core.limits.recovery_delay,
+                    'position_gain': self.core.limits.position_gain,
+                    'velocity_damping': self.core.limits.velocity_damping,
                 },
                 'errors': self.core.errors,
+                'control_mode': self.core.control_mode,
+                'recovery_reason': self.core.recovery_reason,
+                'command_debug': self.core.command_debug,
                 'timeout_left': timeout_left,
                 'dvl_confidence': f.get('samples', {}).get('dvl'),
                 'diagnostics': f.get('diagnostics', []),
@@ -584,6 +728,8 @@ class SequenceExecutor(Node):
                     else None
                 ),
                 'event_log_path': self.event_log_path,
+                'holding_completed_goal': f.get('holding_completed_goal', False),
+                'controller_revision': 'guided_precision_v2',
             },
         )
 
@@ -616,6 +762,33 @@ class SequenceExecutor(Node):
                 return {'code': 'BLOQUEADO', 'title': 'SIN POSICIÓN VÁLIDA', 'detail': nav_error}
             xy, depth, yaw = self.core.errors
             inside = self.core.inside_since is not None
+            settling_faults = []
+            if xy > self.core.limits.xy_tolerance:
+                settling_faults.append(
+                    f'XY {xy:.2f}>{self.core.limits.xy_tolerance:.2f} m'
+                )
+            if depth > self.core.limits.depth_tolerance:
+                settling_faults.append(
+                    f'prof. {depth:.2f}>{self.core.limits.depth_tolerance:.2f} m'
+                )
+            yaw_limit_deg = math.degrees(self.core.limits.yaw_tolerance)
+            if yaw > yaw_limit_deg:
+                settling_faults.append(f'rumbo {yaw:.1f}>{yaw_limit_deg:.1f}°')
+            if self.core.measured_speed > self.core.limits.settle_speed:
+                settling_faults.append(
+                    f'vel. {self.core.measured_speed:.2f}>'
+                    f'{self.core.limits.settle_speed:.2f} m/s'
+                )
+            if self.core.recovery_active:
+                return {
+                    'code': 'RECUPERACION',
+                    'title': 'RECUPERACIÓN ADAPTATIVA',
+                    'detail': (
+                        f'Paso {self.core.index + 1}/{self.total} · '
+                        f'{self.core.recovery_reason} · error XY {xy:.2f} m · '
+                        f'máx. {self.core.limits.recovery_speed:.3f} m/s'
+                    ),
+                }
             if kind == 'wait':
                 required = max(self.core.limits.dwell, step['duration'])
                 elapsed = max(0.0, now - self.core.inside_since) if inside else 0.0
@@ -623,7 +796,7 @@ class SequenceExecutor(Node):
                 if not inside:
                     return {
                         'code': 'CORRIGIENDO',
-                        'title': 'RECUPERANDO POSICIÓN PARA ESPERAR',
+                        'title': 'CORRECCIÓN FINA PARA ESPERAR',
                         'detail': f'Paso {self.core.index + 1}/{self.total} · fuera de tolerancia',
                     }
                 return {
@@ -659,17 +832,30 @@ class SequenceExecutor(Node):
                     'title': 'GIRANDO',
                     'detail': f'Paso {self.core.index + 1}/{self.total} · faltan {yaw:.1f}°',
                 }
+            if settling_faults:
+                settling_detail = 'falta: ' + ' · '.join(settling_faults)
+            elif self.core.inside_since is None:
+                settling_detail = 'verificando tolerancias'
+            else:
+                confirmation_left = max(
+                    0.0,
+                    self.core.limits.dwell - (now - self.core.inside_since),
+                )
+                settling_detail = (
+                    'dentro de tolerancia · '
+                    f'confirmando {confirmation_left:.1f} s'
+                )
             return {
                 'code': 'ESTABILIZANDO',
                 'title': 'ESTABILIZANDO EN EL OBJETIVO',
                 'detail': (
                     f'Paso {self.core.index + 1}/{self.total} · '
-                    'debe permanecer dentro de tolerancia'
+                    + settling_detail
                 ),
             }
         if self.core.state == 'COMPLETED':
             return {'code': 'COMPLETADO', 'title': 'PLAN COMPLETADO', 'detail': self.core.reason}
-        if self.core.state == 'CANCELLED':
+        if self.core.state == 'CANCELLED' and self.validated is None:
             return {'code': 'FALLA', 'title': 'PLAN CANCELADO', 'detail': self.note}
         if nav_error:
             return {'code': 'BLOQUEADO', 'title': 'ESPERANDO TELEMETRÍA', 'detail': nav_error}

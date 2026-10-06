@@ -20,6 +20,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import Bool, Float32, Int8, String
 
+from uuv_dashboard.theme import apply_theme, set_widget_state
+
 
 class Dashboard(QWidget):
     def __init__(self, node):
@@ -31,13 +33,15 @@ class Dashboard(QWidget):
         self.video_time = 0.0
         self.subscriptions = []
         self.setWindowTitle('RobotX | UUV — SOLO LECTURA')
-        self.resize(1050, 750)
-        self.setStyleSheet(
-            'QWidget {background:#17212b; color:#eef2f6;}'
-            'QLabel {font-size:16px; padding:6px;}'
-        )
+        self.setObjectName('RobotXRoot')
+        self.resize(1180, 780)
+        self.setMinimumSize(960, 680)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel('UUV Dashboard — sin envío de comandos'))
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+        self.title = QLabel('UUV Dashboard — sin envío de comandos')
+        self.title.setObjectName('AppTitle')
+        layout.addWidget(self.title)
         grid = QGridLayout()
         layout.addLayout(grid)
         self.labels = {}
@@ -53,6 +57,8 @@ class Dashboard(QWidget):
         for row, (key, title, msg_type, topic) in enumerate(fields):
             grid.addWidget(QLabel(title), row, 0)
             self.labels[key] = QLabel('Sin datos')
+            self.labels[key].setObjectName('TelemetryValue')
+            set_widget_state(self.labels[key], 'neutral')
             grid.addWidget(self.labels[key], row, 1)
             self.subscriptions.append(node.create_subscription(
                 msg_type, topic,
@@ -67,7 +73,7 @@ class Dashboard(QWidget):
             CompressedImage, '/camera/image/compressed', self.receive_image, qos,
         ))
         self.setWindowTitle('RobotX | UUV — Prueba de accesorios')
-        layout.itemAt(0).widget().setText(
+        self.title.setText(
             'UUV Dashboard — accesorios; movimiento deshabilitado'
         )
 
@@ -135,7 +141,7 @@ class Dashboard(QWidget):
         self.mode_timer.start(100)
 
         self.setWindowTitle('RobotX | UUV — Accesorios y modos')
-        layout.itemAt(0).widget().setText(
+        self.title.setText(
             'UUV Dashboard — prueba desarmada; movimiento deshabilitado'
         )
         self.timer = QTimer(self)
@@ -183,12 +189,26 @@ class Dashboard(QWidget):
         }
         for key, label in self.labels.items():
             label.setText(texts[key])
-            color = '#eef2f6'
             if key == 'mode':
                 mode = texts[key]
-                color = '#f1c40f' if mode == 'MANUAL' else (
-                    '#2ecc71' if mode in recognized else '#95a5a6')
-            label.setStyleSheet(f'color:{color}; font-weight:bold;')
+                state = 'warning' if mode == 'MANUAL' else (
+                    'success' if mode in recognized else 'neutral')
+                set_widget_state(label, state)
+            elif key == 'connected':
+                state = (
+                    'success'
+                    if connected is True
+                    else ('danger' if connected is False else 'neutral')
+                )
+                set_widget_state(label, state)
+            elif key == 'armed':
+                armed = self.fresh('armed')
+                state = (
+                    'danger'
+                    if armed is True
+                    else ('success' if armed is False else 'neutral')
+                )
+                set_widget_state(label, state)
         if self.pending_image is not None:
             frame = QPixmap()
             if frame.loadFromData(self.pending_image):
@@ -294,6 +314,7 @@ class Dashboard(QWidget):
 def main(args=None):
     rclpy.init(args=args)
     app = QApplication(sys.argv[:1])
+    apply_theme(app)
     node = Node('uuv_dashboard')
     window = Dashboard(node)
     signal.signal(signal.SIGINT, lambda *_: app.quit())

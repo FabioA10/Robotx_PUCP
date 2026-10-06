@@ -7,6 +7,7 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, Empty, Float32, Int8, String, UInt32, UInt8MultiArray
 
 from .guided_bridge import GuidedBridge
+from .telemetry_tap import TelemetryTap
 
 
 class MavlinkBridgeNode(Node):
@@ -424,6 +425,8 @@ class MavlinkBridgeNode(Node):
             connection_string,
             source_system=self.source_system_id
         )
+        self.telemetry_tap = TelemetryTap(self)
+        self.telemetry_tap.attach(self.master.mav)
         self.guided = GuidedBridge(self)
 
         # =========================================================
@@ -966,6 +969,7 @@ class MavlinkBridgeNode(Node):
             if msg is None:
                 break
 
+            self.telemetry_tap.receive(msg)
             self.guided.observe(msg)
 
             if (
