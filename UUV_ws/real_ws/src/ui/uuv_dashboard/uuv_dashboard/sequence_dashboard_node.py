@@ -36,7 +36,11 @@ from std_msgs.msg import String
 from .pool_dashboard_node import PoolDashboard
 from .sequence_executor_model import move_step, replace_step
 from .theme import apply_theme, set_widget_state
-from .ui_state_model import operator_guidance, workflow_states
+from .ui_state_model import (
+    controller_tuning_payload,
+    operator_guidance,
+    workflow_states,
+)
 
 
 class SequenceDashboard(PoolDashboard):
@@ -189,6 +193,139 @@ class SequenceDashboard(PoolDashboard):
         note.setWordWrap(True)
         limits_grid.addWidget(note, 3, 0, 1, 4)
         planning_layout.addWidget(limits_group)
+
+        controller_group = QGroupBox('Retención de posición y recuperación')
+        controller_group.setMinimumHeight(174)
+        controller_grid = QGridLayout(controller_group)
+        controller_grid.setHorizontalSpacing(12)
+        controller_grid.setVerticalSpacing(5)
+
+        controller_grid.addWidget(
+            self.field_label(
+                'Tolerancia XY total [m]',
+                'Dentro de este error horizontal el objetivo se considera alcanzado.',
+            ),
+            0,
+            0,
+        )
+        self.xy_tolerance = QDoubleSpinBox()
+        self.xy_tolerance.setRange(0.01, 0.15)
+        self.xy_tolerance.setDecimals(3)
+        self.xy_tolerance.setSingleStep(0.005)
+        self.xy_tolerance.setValue(0.03)
+        controller_grid.addWidget(self.xy_tolerance, 0, 1)
+
+        controller_grid.addWidget(
+            self.field_label(
+                'Recuperar desde [m]',
+                'Fuera de este radio se activa la recuperación progresiva de posición.',
+            ),
+            0,
+            2,
+        )
+        self.recovery_radius = QDoubleSpinBox()
+        self.recovery_radius.setDecimals(3)
+        self.recovery_radius.setSingleStep(0.005)
+        self.recovery_radius.setValue(0.08)
+        controller_grid.addWidget(self.recovery_radius, 0, 3)
+
+        controller_grid.addWidget(
+            self.field_label(
+                'Máx. recuperación [m/s]',
+                'Velocidad horizontal máxima usada para volver a la posición objetivo.',
+            ),
+            1,
+            0,
+        )
+        self.recovery_speed = QDoubleSpinBox()
+        self.recovery_speed.setDecimals(3)
+        self.recovery_speed.setSingleStep(0.005)
+        self.recovery_speed.setValue(0.08)
+        controller_grid.addWidget(self.recovery_speed, 1, 1)
+
+        controller_grid.addWidget(
+            self.field_label(
+                'Impulso mínimo [m/s]',
+                'Mínimo comando de recuperación, siempre menor o igual que el máximo.',
+            ),
+            1,
+            2,
+        )
+        self.recovery_min_speed = QDoubleSpinBox()
+        self.recovery_min_speed.setDecimals(3)
+        self.recovery_min_speed.setSingleStep(0.005)
+        self.recovery_min_speed.setValue(0.02)
+        controller_grid.addWidget(self.recovery_min_speed, 1, 3)
+
+        controller_grid.addWidget(
+            self.field_label(
+                'Refuerzo tras respuesta lenta [s]',
+                'Espera antes de elevar gradualmente el esfuerzo de recuperación.',
+            ),
+            2,
+            0,
+        )
+        self.recovery_delay = QDoubleSpinBox()
+        self.recovery_delay.setRange(0.5, 10.0)
+        self.recovery_delay.setDecimals(1)
+        self.recovery_delay.setSingleStep(0.5)
+        self.recovery_delay.setValue(2.0)
+        controller_grid.addWidget(self.recovery_delay, 2, 1)
+
+        controller_grid.addWidget(
+            self.field_label(
+                'Ganancia posición [1/s]',
+                'Convierte el error de posición en velocidad de corrección.',
+            ),
+            2,
+            2,
+        )
+        self.position_gain = QDoubleSpinBox()
+        self.position_gain.setRange(0.10, 2.0)
+        self.position_gain.setDecimals(2)
+        self.position_gain.setSingleStep(0.05)
+        self.position_gain.setValue(0.80)
+        controller_grid.addWidget(self.position_gain, 2, 3)
+
+        controller_grid.addWidget(
+            self.field_label(
+                'Frenado por velocidad [s]',
+                'Amortigua la corrección según la velocidad medida para evitar sobrepasos.',
+            ),
+            3,
+            0,
+        )
+        self.velocity_damping = QDoubleSpinBox()
+        self.velocity_damping.setRange(0.05, 3.0)
+        self.velocity_damping.setDecimals(2)
+        self.velocity_damping.setSingleStep(0.05)
+        self.velocity_damping.setValue(1.20)
+        controller_grid.addWidget(self.velocity_damping, 3, 1)
+        controller_note = QLabel(
+            'Valores conservadores del ejecutor físico. Cambiarlos invalida la preparación '
+            'actual y exige preparar de nuevo.'
+        )
+        controller_note.setObjectName('MutedText')
+        controller_note.setWordWrap(True)
+        controller_grid.addWidget(controller_note, 3, 2, 1, 2)
+        planning_layout.addWidget(controller_group)
+
+        self.controller_inputs = (
+            self.xy_tolerance,
+            self.recovery_radius,
+            self.recovery_speed,
+            self.recovery_min_speed,
+            self.recovery_delay,
+            self.position_gain,
+            self.velocity_damping,
+        )
+        self.xy_tolerance.valueChanged.connect(self.sync_controller_ranges)
+        self.radius.valueChanged.connect(self.sync_controller_ranges)
+        self.max_horizontal_speed.valueChanged.connect(self.sync_controller_ranges)
+        self.recovery_speed.valueChanged.connect(self.sync_controller_ranges)
+        for entry in self.controller_inputs:
+            entry.valueChanged.connect(self.invalidate_preparation)
+        self.sync_controller_ranges()
 
         # Reuse the existing editor and validation of individual steps.
         editor = QGroupBox('Editor de orden')
@@ -422,6 +559,40 @@ class SequenceDashboard(PoolDashboard):
         except (ValueError, TypeError):
             pass
 
+    def sync_controller_ranges(self, *_):
+        """Keep dependent tuning values inside the executor's accepted envelope."""
+        recovery_radius = self.recovery_radius.value()
+        self.recovery_radius.setRange(
+            self.xy_tolerance.value() + 0.005,
+            min(0.50, self.radius.value()),
+        )
+        self.recovery_radius.setValue(recovery_radius)
+
+        recovery_speed = self.recovery_speed.value()
+        self.recovery_speed.setRange(0.001, self.max_horizontal_speed.value())
+        self.recovery_speed.setValue(recovery_speed)
+
+        recovery_min_speed = self.recovery_min_speed.value()
+        self.recovery_min_speed.setRange(0.001, self.recovery_speed.value())
+        self.recovery_min_speed.setValue(recovery_min_speed)
+
+    def invalidate_preparation(self, *_):
+        """Require a new prepare cycle after controller settings change."""
+        self.prepared_signature = None
+        self.pending_prepare = None
+
+    def controller_tuning(self):
+        """Return exactly the tuning keys consumed by the physical executor."""
+        return controller_tuning_payload(
+            self.xy_tolerance.value(),
+            self.recovery_radius.value(),
+            self.recovery_speed.value(),
+            self.recovery_min_speed.value(),
+            self.recovery_delay.value(),
+            self.position_gain.value(),
+            self.velocity_damping.value(),
+        )
+
     def send_action(self, action):
         s = self.exec_status
         if not s or time.monotonic() - self.exec_status_at > 0.5:
@@ -429,27 +600,26 @@ class SequenceDashboard(PoolDashboard):
         if action == 'prepare':
             self.prepared_signature = None
             self.pending_prepare = (self.signature(), time.monotonic(), self.action_count)
-        self.publish(
-            self.request_pub,
-            {
-                'session': s['session'],
-                'ticket': s['ticket'],
-                'ui': self.ui_id,
-                'serial': self.action_count,
-                'action': action,
-                'steps': self.steps,
-                'sensor_depth': self.sensor_depth.value(),
-                'max_depth': self.maximum_depth.value(),
-                'radius': self.radius.value(),
-                'max_horizontal_speed': self.max_horizontal_speed.value(),
-                'max_vertical_speed': self.max_vertical_speed.value(),
-                'max_yaw_speed_deg': self.max_yaw_speed.value(),
-            },
-        )
+        request = {
+            'session': s['session'],
+            'ticket': s['ticket'],
+            'ui': self.ui_id,
+            'serial': self.action_count,
+            'action': action,
+            'steps': self.steps,
+            'sensor_depth': self.sensor_depth.value(),
+            'max_depth': self.maximum_depth.value(),
+            'radius': self.radius.value(),
+            'max_horizontal_speed': self.max_horizontal_speed.value(),
+            'max_vertical_speed': self.max_vertical_speed.value(),
+            'max_yaw_speed_deg': self.max_yaw_speed.value(),
+        }
+        request.update(self.controller_tuning())
+        self.publish(self.request_pub, request)
         self.action_count += 1
 
     def signature(self):
-        return (
+        base = (
             json.dumps(self.steps, sort_keys=True),
             self.sensor_depth.value(),
             self.maximum_depth.value(),
@@ -458,6 +628,7 @@ class SequenceDashboard(PoolDashboard):
             self.max_vertical_speed.value(),
             self.max_yaw_speed.value(),
         )
+        return base + tuple(self.controller_tuning().values())
 
     def configure_step_editor(self, *_):
         kind = self.kind.currentData()
@@ -791,7 +962,7 @@ class SequenceDashboard(PoolDashboard):
             self.max_horizontal_speed,
             self.max_vertical_speed,
             self.max_yaw_speed,
-        ):
+        ) + self.controller_inputs:
             entry.setEnabled(not running and s.get('armed') is False)
         output = 'HABILITADA' if s.get('enabled') else 'DESHABILITADA'
         self.status.setText(f'Salida real {output} · {s.get("mode")} · {s["state"]}')

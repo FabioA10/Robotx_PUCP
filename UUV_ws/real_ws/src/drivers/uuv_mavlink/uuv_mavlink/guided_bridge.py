@@ -537,30 +537,26 @@ class GuidedBridge:
                             self.hold_target = None
                             self.last_reason = 'GUIDED rechazado: ' + fault
                         else:
-                            # Remember the MANUAL pose only as a transition
-                            # guard. Never expose it as a GUIDED position target:
-                            # the vehicle may move slightly before the mode
-                            # heartbeat arrives, and ArduSub may still retain a
-                            # target from an earlier GUIDED session.
-                            manual_reference = self.hold_target
-                            self.hold_target = None
+                            # Keep one position/yaw controller active for the
+                            # whole transition. ArduSub enters GUIDED in waypoint
+                            # control. Switching immediately to velocity control
+                            # and back to waypoint control reinitialises its
+                            # vertical controller twice and produced a large
+                            # first-entry heave transient after every arm cycle.
                             self.guided_request_at = self.clock()
                             self.guided_settle_started = None
-                            self.guided_entry_reference = manual_reference
-
-                            # Preload a neutral velocity command, request the
-                            # mode, then immediately overwrite any retained
-                            # GUIDED target with more neutral commands. Position
-                            # hold is enabled only after the GUIDED heartbeat and
-                            # a fresh pose/velocity sample have been received.
-                            self.send_zero_velocity()
-                            self.send_zero_velocity()
+                            self.guided_entry_reference = self.hold_target
                             self.set_mode('GUIDED')
-                            self.send_zero_velocity()
-                            self.send_zero_velocity()
+                            # The freshly latched MANUAL pose follows SET_MODE
+                            # immediately and is repeated by the 20 Hz timer.
+                            # Thus no old target is reused, without changing the
+                            # ArduSub GUIDED sub-controller during entry.
+                            self.send_hold()
+                            self.send_hold()
                             self.last_reason = (
-                                'GUIDED solicitado con frenado neutro; '
-                                'esperando confirmación para capturar la pose actual'
+                                'GUIDED solicitado con pose MANUAL retenida ('
+                                + self.hold_target_text()
+                                + '); esperando confirmación real'
                             )
                     else:
                         self.last_reason = 'GUIDED rechazado: posición o rumbo no disponibles'
@@ -696,8 +692,10 @@ class GuidedBridge:
         return None
 
     def confirm_guided_entry(self, now):
-        """Capture a fresh stationary pose only after GUIDED is confirmed."""
-        if not self.capture_hold_target():
+        """Confirm GUIDED without replacing the pose latched in MANUAL."""
+        position = self.get('position', self.navigation_sample_timeout)
+        yaw = self.get('yaw', self.navigation_sample_timeout)
+        if self.hold_target is None or position is None or yaw is None or len(position) != 3:
             self.abort_guided_entry('posición o rumbo no disponibles', now)
             return False
         fault = self.guided_request_fault()
@@ -708,7 +706,7 @@ class GuidedBridge:
         self.guided_settle_started = now
         self.guided_entry_reference = self.hold_target
         self.last_reason = (
-            'GUIDED confirmado; pose actual capturada y retenida ('
+            'GUIDED confirmado; manteniendo pose previa de MANUAL ('
             + self.hold_target_text()
             + ')'
         )
@@ -908,37 +906,39 @@ class GuidedBridge:
                     self.set_mode('MANUAL')
                     self.next_mode_request = now + 0.5
             if self.guided_request_at is not None:
-                # While the mode heartbeat is pending, stream only a neutral
-                # velocity target. No position from this or an earlier entry is
-                # allowed to become active during the transition.
-                self.send_zero_velocity()
-                self.send_zero_velocity()
-                # The MANUAL pose is only a diagnostic reference. Small drift
-                # is expected in water and must not force repeated attempts;
-                # only an unsafe measured speed blocks the transition. The
-                # actual hold pose is recaptured after GUIDED is confirmed.
-                fault = self.guided_request_fault()
-                if fault:
-                    self.abort_guided_entry(fault, now)
+                # Repeat only the freshly captured position/yaw target. Do not
+                # alternate velocity and position masks: each mask change makes
+                # ArduSub reinitialise a different GUIDED sub-controller.
+                if not self.send_hold():
+                    self.abort_guided_entry('pose MANUAL retenida no disponible', now)
                     self.send_zero_velocity()
                     self.set_mode('MANUAL')
                     self.next_mode_request = now + 0.5
-                elif b.mode == 'GUIDED':
-                    if self.confirm_guided_entry(now):
-                        # Start one coherent position/yaw hold from the fresh
-                        # post-confirmation pose. Do not alternate it with a
-                        # velocity target after this point.
-                        self.send_hold()
-                        self.send_hold()
-                    else:
+                else:
+                    self.send_hold()
+                    # Small water drift is expected while the mode heartbeat is
+                    # pending; only an unsafe measured speed blocks the transition.
+                    fault = self.guided_request_fault()
+                    if fault:
+                        self.abort_guided_entry(fault, now)
                         self.send_zero_velocity()
                         self.set_mode('MANUAL')
                         self.next_mode_request = now + 0.5
-                elif now - self.guided_request_at > 2.0:
-                    self.abort_guided_entry('GUIDED no confirmado dentro de 2 s', now)
-                    self.send_zero_velocity()
-                    self.set_mode('MANUAL')
-                    self.next_mode_request = now + 0.5
+                    elif b.mode == 'GUIDED':
+                        if self.confirm_guided_entry(now):
+                            # Continue the same controller and the same target used
+                            # since SET_MODE. This makes the handover bumpless.
+                            self.send_hold()
+                            self.send_hold()
+                        else:
+                            self.send_zero_velocity()
+                            self.set_mode('MANUAL')
+                            self.next_mode_request = now + 0.5
+                    elif now - self.guided_request_at > 2.0:
+                        self.abort_guided_entry('GUIDED no confirmado dentro de 2 s', now)
+                        self.send_zero_velocity()
+                        self.set_mode('MANUAL')
+                        self.next_mode_request = now + 0.5
             if self.owner:
                 reasons = self.output_reasons()
                 if not b.armed or b.mode != 'GUIDED':
@@ -979,6 +979,7 @@ class GuidedBridge:
                         fault = self.guided_entry_fault()
                         if fault:
                             self.abort_guided_entry(fault, now)
+                            self.send_zero_velocity()
                             self.set_mode('MANUAL')
                             self.next_mode_request = now + 0.5
                         elif (
@@ -1017,7 +1018,7 @@ class GuidedBridge:
                 'guided_settling': self.guided_settle_started is not None,
                 'hold_target': list(self.hold_target) if self.hold_target is not None else None,
                 'holding_completed_goal': self.holding_completed_goal,
-                'controller_revision': 'guided_precision_v2',
+                'controller_revision': 'guided_bumpless_v3',
                 'dvl_input': self.dvl_input,
                 'samples': {
                     k: self.get(k, 1.5 if k == 'dvl' else self.navigation_sample_timeout)

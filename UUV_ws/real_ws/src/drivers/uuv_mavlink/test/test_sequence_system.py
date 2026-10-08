@@ -401,7 +401,7 @@ class TestGuidedTransport(unittest.TestCase):
         self.assertEqual(packets[-1][1:5], (1, 1, 1, 2503))
         self.assertEqual(packets[-1][8:11], (0.1, 0.0, 0.0))
 
-    def test_guided_entry_brakes_then_holds_fresh_confirmed_pose(self):
+    def test_guided_entry_keeps_one_position_controller_and_manual_pose(self):
         self.b.mode = 'MANUAL'
         self.g.tick()
         self.g.put('position', [1.2, -0.4, 0.7])
@@ -411,17 +411,15 @@ class TestGuidedTransport(unittest.TestCase):
             [1 for n, _ in self.b.master.mav.sent if n == 'set_position_target_local_ned_send']
         )
         self.g.action(self.action('guided'))
-        self.assertIsNone(self.g.hold_target)
+        self.assertEqual(self.g.hold_target, (1.2, -0.4, 0.7, 0.3))
         self.assertEqual(self.g.guided_entry_reference, (1.2, -0.4, 0.7, 0.3))
         after = len(
             [1 for n, _ in self.b.master.mav.sent if n == 'set_position_target_local_ned_send']
         )
-        self.assertEqual(after, before + 4)
+        self.assertEqual(after, before + 2)
         self.assertEqual(
-            [name for name, _ in self.b.master.mav.sent[-5:]],
+            [name for name, _ in self.b.master.mav.sent[-3:]],
             [
-                'set_position_target_local_ned_send',
-                'set_position_target_local_ned_send',
                 'set_mode_send',
                 'set_position_target_local_ned_send',
                 'set_position_target_local_ned_send',
@@ -433,8 +431,11 @@ class TestGuidedTransport(unittest.TestCase):
             if name == 'set_position_target_local_ned_send'
         ][before:after]
         self.assertTrue(transition_packets)
-        self.assertTrue(all(packet[4] == 1479 for packet in transition_packets))
-        self.assertTrue(all(packet[8:11] == (0.0, 0.0, 0.0) for packet in transition_packets))
+        self.assertTrue(all(packet[4] == 2552 for packet in transition_packets))
+        self.assertTrue(
+            all(packet[5:8] == (1.2, -0.4, 0.7) for packet in transition_packets)
+        )
+        self.assertTrue(all(packet[14] == 0.3 for packet in transition_packets))
         mode_packets = [a for n, a in self.b.master.mav.sent if n == 'set_mode_send']
         self.assertEqual(mode_packets[-1], (1, 1, 4))
 
@@ -448,21 +449,23 @@ class TestGuidedTransport(unittest.TestCase):
             for name, args in self.b.master.mav.sent
             if name == 'set_position_target_local_ned_send'
         ][after:repeated]
-        self.assertTrue(all(packet[4] == 1479 for packet in pending_packets))
+        self.assertTrue(all(packet[4] == 2552 for packet in pending_packets))
+        self.assertTrue(all(packet[5:8] == (1.2, -0.4, 0.7) for packet in pending_packets))
 
         self.g.put('position', [1.25, -0.45, 0.72])
         self.g.put('velocity', [0, 0, 0])
         self.g.put('yaw', 0.32)
         self.b.mode = 'GUIDED'
         self.g.tick()
-        self.assertEqual(self.g.hold_target, (1.25, -0.45, 0.72, 0.32))
+        self.assertEqual(self.g.hold_target, (1.2, -0.4, 0.7, 0.3))
         packets = [
             a for n, a in self.b.master.mav.sent if n == 'set_position_target_local_ned_send'
         ]
         self.assertEqual(packets[-1][1:5], (1, 1, 1, 2552))
-        self.assertEqual(packets[-1][5:8], (1.25, -0.45, 0.72))
+        self.assertEqual(packets[-1][5:8], (1.2, -0.4, 0.7))
         self.assertEqual(packets[-1][8:14], (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertAlmostEqual(packets[-1][14], 0.32)
+        self.assertAlmostEqual(packets[-1][14], 0.3)
+        self.assertTrue(all(packet[4] == 2552 for packet in packets[before:]))
         self.assertIn('Estabilizando entrada a GUIDED', self.g.output_reasons())
 
         self.now += 5.01
@@ -481,13 +484,13 @@ class TestGuidedTransport(unittest.TestCase):
         self.g.put('yaw', 0.1)
         self.g.tick()
         self.g.action(self.action('guided'))
-        self.assertIsNone(self.g.hold_target)
+        self.assertEqual(self.g.hold_target, (1, 2, 0.3, 0.1))
         self.b.mode = 'GUIDED'
         self.g.put('position', [1.01, 2.01, 0.31])
         self.g.put('velocity', [0, 0, 0])
         self.g.put('yaw', 0.11)
         self.g.tick()
-        self.assertEqual(self.g.hold_target, (1.01, 2.01, 0.31, 0.11))
+        self.assertEqual(self.g.hold_target, (1, 2, 0.3, 0.1))
 
         self.b.mode = 'MANUAL'
         self.g.tick()
@@ -503,18 +506,18 @@ class TestGuidedTransport(unittest.TestCase):
             len(
                 [1 for n, _ in self.b.master.mav.sent if n == 'set_position_target_local_ned_send']
             ),
-            before + 4,
+            before + 2,
         )
         self.b.mode = 'GUIDED'
         self.g.put('position', [4.01, 5.01, 0.62])
         self.g.put('velocity', [0, 0, 0])
         self.g.put('yaw', 0.42)
         self.g.tick()
-        self.assertEqual(self.g.hold_target, (4.01, 5.01, 0.62, 0.42))
+        self.assertEqual(self.g.hold_target, (4, 5, 0.6, 0.4))
         packets = [
             a for n, a in self.b.master.mav.sent if n == 'set_position_target_local_ned_send'
         ]
-        self.assertEqual(packets[-1][5:8], (4.01, 5.01, 0.62))
+        self.assertEqual(packets[-1][5:8], (4, 5, 0.6))
 
     def test_guided_entry_rejects_vehicle_already_moving(self):
         self.b.mode = 'MANUAL'
@@ -528,7 +531,7 @@ class TestGuidedTransport(unittest.TestCase):
             self.assertIn('movimiento ' + text, self.g.last_reason)
             self.g.tick()
 
-    def test_guided_entry_allows_small_water_drift_and_recaptures_pose(self):
+    def test_guided_entry_allows_small_water_drift_without_moving_target(self):
         self.b.mode = 'MANUAL'
         self.g.tick()
         self.g.put('velocity', [0.12, 0, 0])
@@ -545,7 +548,7 @@ class TestGuidedTransport(unittest.TestCase):
         self.g.tick()
         self.assertEqual(
             self.g.hold_target,
-            (0.11, 0.02, 0.03, math.radians(3)),
+            (0, 0, 0, 0),
         )
 
     def test_guided_entry_vertical_transient_returns_to_manual(self):
@@ -559,6 +562,10 @@ class TestGuidedTransport(unittest.TestCase):
         self.g.tick()
         self.assertEqual(self.g.abort_mode, 'MANUAL')
         self.assertIn('Velocidad vertical', self.g.last_reason)
+        packets = [
+            a for n, a in self.b.master.mav.sent if n == 'set_position_target_local_ned_send'
+        ]
+        self.assertEqual(packets[-1][4], 1479)
         mode_packets = [a for n, a in self.b.master.mav.sent if n == 'set_mode_send']
         self.assertEqual(mode_packets[-1], (1, 1, 19))
 

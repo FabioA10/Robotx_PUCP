@@ -4,6 +4,27 @@
 STAGES = ('configure', 'prepare', 'arm', 'guided', 'execute')
 
 
+def controller_tuning_payload(
+    xy_tolerance,
+    recovery_radius,
+    recovery_speed,
+    recovery_min_speed,
+    recovery_delay,
+    position_gain,
+    velocity_damping,
+):
+    """Return the controller fields understood by the physical executor."""
+    return {
+        'xy_tolerance': xy_tolerance,
+        'recovery_radius': recovery_radius,
+        'recovery_speed': recovery_speed,
+        'recovery_min_speed': recovery_min_speed,
+        'recovery_delay': recovery_delay,
+        'position_gain': position_gain,
+        'velocity_damping': velocity_damping,
+    }
+
+
 def workflow_states(status, fresh, has_steps, plan_matches):
     """Return visual states without changing controller decisions."""
     states = {name: 'neutral' for name in STAGES}

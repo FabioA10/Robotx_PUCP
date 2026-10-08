@@ -2,7 +2,11 @@
 
 import unittest
 
-from uuv_dashboard.ui_state_model import operator_guidance, workflow_states
+from uuv_dashboard.ui_state_model import (
+    controller_tuning_payload,
+    operator_guidance,
+    workflow_states,
+)
 
 
 def status(**changes):
@@ -67,6 +71,21 @@ class UiStateModelTests(unittest.TestCase):
         guide = operator_guidance(current, True, True, True)
         self.assertTrue(guide['abort_available'])
         self.assertEqual(workflow_states(current, True, True, True)['execute'], 'active')
+
+    def test_controller_tuning_uses_the_physical_executor_contract(self):
+        tuning = controller_tuning_payload(0.03, 0.08, 0.08, 0.02, 2.0, 0.8, 1.2)
+        self.assertEqual(
+            tuning,
+            {
+                'xy_tolerance': 0.03,
+                'recovery_radius': 0.08,
+                'recovery_speed': 0.08,
+                'recovery_min_speed': 0.02,
+                'recovery_delay': 2.0,
+                'position_gain': 0.8,
+                'velocity_damping': 1.2,
+            },
+        )
 
 
 if __name__ == '__main__':

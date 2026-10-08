@@ -76,7 +76,7 @@ class SequenceExecutor(Node):
         self.timer = self.create_timer(0.05, self.tick)
         self.record_event(
             'INFO', 'INICIO', 'Ejecutor de secuencias iniciado',
-            controller_revision='guided_precision_v2',
+            controller_revision='guided_bumpless_v3',
         )
 
     def record_event(self, level, event, detail, **fields):
@@ -729,7 +729,7 @@ class SequenceExecutor(Node):
                 ),
                 'event_log_path': self.event_log_path,
                 'holding_completed_goal': f.get('holding_completed_goal', False),
-                'controller_revision': 'guided_precision_v2',
+                'controller_revision': 'guided_bumpless_v3',
             },
         )
 
