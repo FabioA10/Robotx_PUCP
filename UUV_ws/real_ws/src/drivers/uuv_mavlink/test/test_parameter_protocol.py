@@ -24,10 +24,20 @@ VALUES = {
 class ParameterProtocolTests(unittest.TestCase):
     """Keep arbitrary parameters and unsafe vehicle states outside the channel."""
 
-    def test_accepts_only_complete_bounded_symmetric_values(self):
+    def test_accepts_complete_full_range_symmetric_values(self):
         self.assertEqual(normalize_parameter_values(VALUES), VALUES)
+        full_range = {
+            'MOT_PWM_MIN': 1100.0,
+            'MOT_PWM_MAX': 1900.0,
+            'WPNAV_SPEED_UP': 1000.0,
+            'WPNAV_SPEED_DN': 500.0,
+            'WPNAV_ACCEL_Z': 500.0,
+        }
+        self.assertEqual(normalize_parameter_values(full_range), full_range)
         with self.assertRaises(ValueError):
-            normalize_parameter_values(dict(VALUES, MOT_PWM_MIN=1200.0))
+            normalize_parameter_values(dict(VALUES, MOT_PWM_MIN=1099.0))
+        with self.assertRaises(ValueError):
+            normalize_parameter_values(dict(VALUES, MOT_PWM_MAX=1901.0))
         with self.assertRaises(ValueError):
             normalize_parameter_values(dict(VALUES, MOT_PWM_MAX=1660.0))
         with self.assertRaises(ValueError):
@@ -38,11 +48,10 @@ class ParameterProtocolTests(unittest.TestCase):
         self.assertTrue(parameter_sets_match(VALUES, readback))
         self.assertFalse(parameter_sets_match(VALUES, dict(VALUES, WPNAV_ACCEL_Z=50.2)))
 
-    def test_legacy_readback_is_visible_but_cannot_be_requested(self):
+    def test_previous_low_acceleration_remains_writable(self):
         legacy = dict(VALUES, WPNAV_ACCEL_Z=20.0)
         self.assertEqual(normalize_observed_parameter_values(legacy), legacy)
-        with self.assertRaises(ValueError):
-            normalize_parameter_values(legacy)
+        self.assertEqual(normalize_parameter_values(legacy), legacy)
 
     def test_mavlink_parameter_type_is_validated(self):
         self.assertEqual(parameter_type(9), 9)

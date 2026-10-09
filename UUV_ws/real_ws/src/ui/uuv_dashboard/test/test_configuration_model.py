@@ -54,6 +54,30 @@ class ConfigurationModelTests(unittest.TestCase):
         asymmetric = dict(desired, MOT_PWM_MAX=1640.0)
         self.assertFalse(raw_parameters_match(desired, asymmetric))
 
+    def test_owner_can_select_full_technical_vehicle_ranges(self):
+        profile = default_profile()
+        profile['vehicle'] = {
+            'propulsion_signal_limit_pct': 100.0,
+            'max_ascent_speed_mps': 10.0,
+            'max_descent_speed_mps': 5.0,
+            'max_vertical_accel_mps2': 5.0,
+        }
+        values = profile_to_raw_parameters(profile)
+        self.assertEqual(
+            values,
+            {
+                'MOT_PWM_MIN': 1100.0,
+                'MOT_PWM_MAX': 1900.0,
+                'WPNAV_SPEED_UP': 1000.0,
+                'WPNAV_SPEED_DN': 500.0,
+                'WPNAV_ACCEL_Z': 500.0,
+            },
+        )
+        self.assertEqual(
+            raw_parameters_to_vehicle(values)['propulsion_signal_limit_pct'],
+            100.0,
+        )
+
     def test_store_reopens_active_profile_and_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'profiles.json'
@@ -87,7 +111,7 @@ class ConfigurationModelTests(unittest.TestCase):
             with path.open('r', encoding='utf-8') as stream:
                 self.assertEqual(json.load(stream)['version'], CONFIG_VERSION)
 
-    def test_v1_profile_is_migrated_to_documented_acceleration_floor(self):
+    def test_v1_profile_preserves_owner_acceleration_inside_full_range(self):
         old = default_document()
         old['version'] = 1
         old['profiles']['Piscina conservador']['vehicle'][
@@ -98,7 +122,7 @@ class ConfigurationModelTests(unittest.TestCase):
             migrated['profiles']['Piscina conservador']['vehicle'][
                 'max_vertical_accel_mps2'
             ],
-            0.50,
+            0.20,
         )
 
     def test_profiles_can_be_renamed_and_deleted_without_silent_overwrite(self):

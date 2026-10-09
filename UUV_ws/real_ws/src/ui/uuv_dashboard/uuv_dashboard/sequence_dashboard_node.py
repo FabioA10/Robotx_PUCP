@@ -146,6 +146,9 @@ class SequenceDashboard(PoolDashboard):
         self.lights_off_pub = node.create_publisher(
             Empty, '/uuv/control/lights_off', 10
         )
+        self.command_scale_setpoint_pub = node.create_publisher(
+            Float32, '/uuv/control/command_scale_setpoint', 10
+        )
         configuration_page = QWidget()
         configuration_page.setObjectName('RobotXRoot')
         configuration_layout = QVBoxLayout(configuration_page)
@@ -486,64 +489,87 @@ class SequenceDashboard(PoolDashboard):
         vehicle_grid.addWidget(
             self.field_label(
                 'Límite de señal de propulsión [%]',
-                'Porcentaje simétrico del recorrido 1100–1900 µs; no equivale '
-                'directamente a potencia ni corriente.',
+                'Rango técnico completo: 1–100 % del recorrido simétrico '
+                '1100–1900 µs. No equivale directamente a potencia ni corriente.',
             ),
             0,
             0,
         )
         self.propulsion_signal_limit = QDoubleSpinBox()
-        self.propulsion_signal_limit.setRange(25.0, 50.0)
+        self.propulsion_signal_limit.setRange(1.0, 100.0)
         self.propulsion_signal_limit.setDecimals(1)
-        self.propulsion_signal_limit.setSingleStep(2.5)
+        self.propulsion_signal_limit.setSingleStep(1.0)
         self.propulsion_signal_limit.setValue(37.5)
         vehicle_grid.addWidget(self.propulsion_signal_limit, 0, 1)
+
+        vehicle_grid.addWidget(
+            self.field_label(
+                'Escala Xbox/MANUAL de sesión [%]',
+                'Ajuste temporal 0–100 % del mando. No modifica parámetros '
+                'persistentes y requiere RB liberado al aplicarlo.',
+            ),
+            1,
+            0,
+        )
+        manual_scale_row = QHBoxLayout()
+        self.manual_command_scale = QDoubleSpinBox()
+        self.manual_command_scale.setRange(0.0, 100.0)
+        self.manual_command_scale.setDecimals(1)
+        self.manual_command_scale.setSingleStep(5.0)
+        self.manual_command_scale.setValue(20.0)
+        manual_scale_row.addWidget(self.manual_command_scale)
+        self.apply_manual_scale_button = QPushButton('Aplicar')
+        self.apply_manual_scale_button.clicked.connect(
+            self.apply_manual_command_scale
+        )
+        manual_scale_row.addWidget(self.apply_manual_scale_button)
+        vehicle_grid.addLayout(manual_scale_row, 1, 1)
 
         vehicle_grid.addWidget(
             self.field_label(
                 'Velocidad máxima de ascenso [m/s]',
                 'Se guarda internamente como WPNAV_SPEED_UP en cm/s.',
             ),
-            1,
+            2,
             0,
         )
         self.max_ascent_speed = QDoubleSpinBox()
-        self.max_ascent_speed.setRange(0.10, 0.30)
+        self.max_ascent_speed.setRange(0.0, 10.0)
         self.max_ascent_speed.setDecimals(2)
-        self.max_ascent_speed.setSingleStep(0.01)
+        self.max_ascent_speed.setSingleStep(0.05)
         self.max_ascent_speed.setValue(0.10)
-        vehicle_grid.addWidget(self.max_ascent_speed, 1, 1)
+        vehicle_grid.addWidget(self.max_ascent_speed, 2, 1)
 
         vehicle_grid.addWidget(
             self.field_label(
                 'Velocidad máxima de descenso [m/s]',
                 'Se guarda internamente como WPNAV_SPEED_DN en cm/s.',
             ),
-            2,
+            3,
             0,
         )
         self.max_descent_speed = QDoubleSpinBox()
-        self.max_descent_speed.setRange(0.10, 0.30)
+        self.max_descent_speed.setRange(0.0, 5.0)
         self.max_descent_speed.setDecimals(2)
-        self.max_descent_speed.setSingleStep(0.01)
+        self.max_descent_speed.setSingleStep(0.05)
         self.max_descent_speed.setValue(0.10)
-        vehicle_grid.addWidget(self.max_descent_speed, 2, 1)
+        vehicle_grid.addWidget(self.max_descent_speed, 3, 1)
 
         vehicle_grid.addWidget(
             self.field_label(
                 'Aceleración vertical máxima [m/s²]',
-                'Se guarda como WPNAV_ACCEL_Z. ArduSub 4.5 documenta un mínimo '
-                'de 50 cm/s²; valores menores quedan bloqueados.',
+                'Se guarda como WPNAV_ACCEL_Z. El panel expone el rango técnico '
+                '0–500 cm/s² para pruebas del propietario.',
             ),
-            3,
+            4,
             0,
         )
         self.max_vertical_accel = QDoubleSpinBox()
-        self.max_vertical_accel.setRange(0.50, 1.0)
+        self.max_vertical_accel.setRange(0.0, 5.0)
         self.max_vertical_accel.setDecimals(2)
         self.max_vertical_accel.setSingleStep(0.05)
         self.max_vertical_accel.setValue(0.50)
-        vehicle_grid.addWidget(self.max_vertical_accel, 3, 1)
+        vehicle_grid.addWidget(self.max_vertical_accel, 4, 1)
 
         self.vehicle_inputs = (
             self.propulsion_signal_limit,
@@ -557,18 +583,18 @@ class SequenceDashboard(PoolDashboard):
         )
         self.parameter_raw_values.setObjectName('MutedText')
         self.parameter_raw_values.setWordWrap(True)
-        vehicle_grid.addWidget(self.parameter_raw_values, 4, 0, 1, 2)
+        vehicle_grid.addWidget(self.parameter_raw_values, 5, 0, 1, 2)
 
         self.parameter_state = QLabel('Esperando lectura del autopiloto')
         self.parameter_state.setObjectName('TelemetryValue')
         self.parameter_state.setWordWrap(True)
         set_widget_state(self.parameter_state, 'neutral')
-        vehicle_grid.addWidget(self.parameter_state, 5, 0, 1, 2)
+        vehicle_grid.addWidget(self.parameter_state, 6, 0, 1, 2)
 
         self.parameter_comparison = QLabel('Comparación: esperando lectura del ROV')
         self.parameter_comparison.setObjectName('MutedText')
         self.parameter_comparison.setWordWrap(True)
-        vehicle_grid.addWidget(self.parameter_comparison, 6, 0, 1, 2)
+        vehicle_grid.addWidget(self.parameter_comparison, 7, 0, 1, 2)
 
         self.electrical_state = QLabel(
             'Protección eléctrica: esperando parámetros de solo lectura'
@@ -576,7 +602,7 @@ class SequenceDashboard(PoolDashboard):
         self.electrical_state.setObjectName('TelemetryValue')
         self.electrical_state.setWordWrap(True)
         set_widget_state(self.electrical_state, 'neutral')
-        vehicle_grid.addWidget(self.electrical_state, 7, 0, 1, 2)
+        vehicle_grid.addWidget(self.electrical_state, 8, 0, 1, 2)
 
         parameter_buttons = QGridLayout()
         self.read_parameters_button = QPushButton('Leer del ROV')
@@ -589,14 +615,14 @@ class SequenceDashboard(PoolDashboard):
         parameter_buttons.addWidget(self.read_parameters_button, 0, 0)
         parameter_buttons.addWidget(self.apply_parameters_button, 0, 1)
         parameter_buttons.addWidget(self.restore_parameters_button, 1, 0, 1, 2)
-        vehicle_grid.addLayout(parameter_buttons, 8, 0, 1, 2)
+        vehicle_grid.addLayout(parameter_buttons, 9, 0, 1, 2)
         vehicle_warning = QLabel(
             'Estos límites reducen órdenes, pero no garantizan una corriente menor '
             'de 75 A ni eliminan el pico eléctrico de encendido.'
         )
         vehicle_warning.setObjectName('SafetyNote')
         vehicle_warning.setWordWrap(True)
-        vehicle_grid.addWidget(vehicle_warning, 9, 0, 1, 2)
+        vehicle_grid.addWidget(vehicle_warning, 10, 0, 1, 2)
         configuration_cards.addWidget(vehicle_group, 1)
 
         profile_bar = QFrame()
@@ -1962,6 +1988,16 @@ class SequenceDashboard(PoolDashboard):
         """Request a harmless read of the five parameters."""
         self._parameter_request('read')
 
+    def apply_manual_command_scale(self):
+        """Apply the owner-selected runtime scale without persisting ArduSub data."""
+        message = Float32()
+        message.data = float(self.manual_command_scale.value()) / 100.0
+        self.command_scale_setpoint_pub.publish(message)
+        self.runtime_scope.setText(
+            'Escala Xbox/MANUAL solicitada: '
+            f'{self.manual_command_scale.value():.1f} %. Esperando confirmación del bridge.'
+        )
+
     def apply_vehicle_parameters(self):
         """Ask for deliberate guarded application of the displayed vehicle values."""
         try:
@@ -1971,14 +2007,16 @@ class SequenceDashboard(PoolDashboard):
             return
         answer = QMessageBox.question(
             self,
-            'Aplicar parámetros al ROV',
-            'Se modificarán cinco parámetros persistentes. La operación solo continuará '
+            'Aplicar rango técnico al ROV',
+            'Se modificarán cinco parámetros persistentes con los valores elegidos por '
+            'el propietario. La operación solo continuará '
             'en MANUAL, desarmado y sin secuencia activa.\n\n'
             f'PWM: {values["MOT_PWM_MIN"]:.0f}–{values["MOT_PWM_MAX"]:.0f} µs\n'
             f'Ascenso/descenso: {values["WPNAV_SPEED_UP"]:g}/'
             f'{values["WPNAV_SPEED_DN"]:g} cm/s\n'
             f'Aceleración vertical: {values["WPNAV_ACCEL_Z"]:g} cm/s²\n\n'
-            '¿Aplicar y verificar?',
+            'Los límites altos pueden producir aceleración, consumo y empuje elevados.\n\n'
+            '¿Aplicar exactamente estos valores y verificar?',
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )

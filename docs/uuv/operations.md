@@ -91,6 +91,12 @@ Argumentos Ping360: `sonar_host=192.168.2.2`, `sonar_port=9092`,
 `sonar_range=5.0`, `sonar_threshold=1`, `sonar_angle_step=4`,
 `sonar_filter_radius=2.0` y `sonar_filter_min_intensity=90.0`.
 
+La pestaña de configuración permite cambiar durante la sesión la escala
+Xbox/MANUAL entre 0 y 100 %, sin reiniciar el launch. El cambio se publica en
+`/uuv/control/command_scale_setpoint`, requiere `RB` liberado y se confirma en
+`/uuv/control/command_scale`. Es temporal: al reiniciar vuelve al valor
+`command_scale` del lanzamiento.
+
 Ejemplo con sonar, sin movimiento:
 
 ```bash
@@ -106,17 +112,21 @@ ros2 launch uuv_dashboard uuv_sequences.launch.py \
 
 ## Escritura restringida de parámetros
 
-La interfaz solo admite estos cinco parámetros y rangos:
+La interfaz expone estos cinco parámetros dentro del rango técnico completo
+usado por el sistema:
 
 | Parámetro | Intervalo permitido |
 |---|---:|
-| `MOT_PWM_MIN` | 1300–1400 |
-| `MOT_PWM_MAX` | 1600–1700 |
-| `WPNAV_SPEED_UP` | 10–30 |
-| `WPNAV_SPEED_DN` | 10–30 |
-| `WPNAV_ACCEL_Z` | 50–100 |
+| `MOT_PWM_MIN` | 1100–1499 µs |
+| `MOT_PWM_MAX` | 1501–1900 µs |
+| `WPNAV_SPEED_UP` | 0–1000 cm/s |
+| `WPNAV_SPEED_DN` | 0–500 cm/s |
+| `WPNAV_ACCEL_Z` | 0–500 cm/s² |
 
-`MOT_PWM_MIN` y `MOT_PWM_MAX` deben ser simétricos respecto a 1500. La
+El control de propulsión permite `1–100 %`; `100 %` produce el intervalo
+`1100–1900 µs`. `MOT_PWM_MIN` y `MOT_PWM_MAX` deben permanecer simétricos
+respecto a 1500. El porcentaje es recorrido PWM, no porcentaje medido de
+empuje, potencia o corriente. La
 escritura se bloquea sin heartbeat reciente, con el vehículo armado, fuera de
 `MANUAL`, con `RB` presionado, durante una secuencia o si no se confirma
 ArduSub 4.5.7. Cada operación captura un snapshot, escribe de uno en uno,

@@ -62,11 +62,11 @@ def normalize_parameter_values(values):
     if extra:
         raise ValueError('Parámetros no permitidos: ' + ', '.join(sorted(extra)))
     normalized = {
-        'MOT_PWM_MIN': _number(values['MOT_PWM_MIN'], 'MOT_PWM_MIN', 1300, 1400),
-        'MOT_PWM_MAX': _number(values['MOT_PWM_MAX'], 'MOT_PWM_MAX', 1600, 1700),
-        'WPNAV_SPEED_UP': _number(values['WPNAV_SPEED_UP'], 'WPNAV_SPEED_UP', 10, 30),
-        'WPNAV_SPEED_DN': _number(values['WPNAV_SPEED_DN'], 'WPNAV_SPEED_DN', 10, 30),
-        'WPNAV_ACCEL_Z': _number(values['WPNAV_ACCEL_Z'], 'WPNAV_ACCEL_Z', 50, 100),
+        'MOT_PWM_MIN': _number(values['MOT_PWM_MIN'], 'MOT_PWM_MIN', 1100, 1499),
+        'MOT_PWM_MAX': _number(values['MOT_PWM_MAX'], 'MOT_PWM_MAX', 1501, 1900),
+        'WPNAV_SPEED_UP': _number(values['WPNAV_SPEED_UP'], 'WPNAV_SPEED_UP', 0, 1000),
+        'WPNAV_SPEED_DN': _number(values['WPNAV_SPEED_DN'], 'WPNAV_SPEED_DN', 0, 500),
+        'WPNAV_ACCEL_Z': _number(values['WPNAV_ACCEL_Z'], 'WPNAV_ACCEL_Z', 0, 500),
     }
     low_span = 1500.0 - normalized['MOT_PWM_MIN']
     high_span = normalized['MOT_PWM_MAX'] - 1500.0

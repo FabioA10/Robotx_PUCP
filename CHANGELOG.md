@@ -5,6 +5,11 @@ pertenecen en `docs/testing/` o junto al subsistema correspondiente.
 
 ## 2026-10-09
 
+- Ampliación del panel de propietario al rango técnico completo: señal PWM
+  simétrica de 1–100 %, ascenso 0–10 m/s, descenso 0–5 m/s y aceleración
+  vertical 0–5 m/s²; se conservan verificación, snapshot y rollback.
+- Control temporal desde la interfaz para cambiar la escala Xbox/MANUAL entre
+  0 y 100 % sin reiniciar el launch.
 - Unificación de cámara y luces desde mando e interfaz mediante
   `accessory_control` y un único bridge MAVLink.
 - Biblioteca de misiones con guardar, cargar, renombrar, eliminar y borrador

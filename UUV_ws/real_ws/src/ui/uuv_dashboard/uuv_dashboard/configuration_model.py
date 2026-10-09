@@ -124,10 +124,10 @@ def normalize_profile(profile):
         profile.get('vehicle'),
         VEHICLE_DEFAULTS,
         {
-            'propulsion_signal_limit_pct': (25.0, 50.0),
-            'max_ascent_speed_mps': (0.10, 0.30),
-            'max_descent_speed_mps': (0.10, 0.30),
-            'max_vertical_accel_mps2': (0.50, 1.0),
+            'propulsion_signal_limit_pct': (1.0, 100.0),
+            'max_ascent_speed_mps': (0.0, 10.0),
+            'max_descent_speed_mps': (0.0, 5.0),
+            'max_vertical_accel_mps2': (0.0, 5.0),
         },
     )
     display_source = profile.get('display')
@@ -183,23 +183,13 @@ def normalize_raw_parameters(values, observed=False):
     missing = [name for name in RAW_PARAMETER_NAMES if name not in values]
     if missing:
         raise ValueError('Faltan parámetros: ' + ', '.join(missing))
-    ranges = (
-        {
-            'MOT_PWM_MIN': (1100, 1499),
-            'MOT_PWM_MAX': (1501, 1900),
-            'WPNAV_SPEED_UP': (0, 1000),
-            'WPNAV_SPEED_DN': (0, 500),
-            'WPNAV_ACCEL_Z': (0, 500),
-        }
-        if observed
-        else {
-            'MOT_PWM_MIN': (1300, 1400),
-            'MOT_PWM_MAX': (1600, 1700),
-            'WPNAV_SPEED_UP': (10, 30),
-            'WPNAV_SPEED_DN': (10, 30),
-            'WPNAV_ACCEL_Z': (50, 100),
-        }
-    )
+    ranges = {
+        'MOT_PWM_MIN': (1100, 1499),
+        'MOT_PWM_MAX': (1501, 1900),
+        'WPNAV_SPEED_UP': (0, 1000),
+        'WPNAV_SPEED_DN': (0, 500),
+        'WPNAV_ACCEL_Z': (0, 500),
+    }
     result = {
         name: _number(values[name], name, *ranges[name])
         for name in RAW_PARAMETER_NAMES
@@ -252,7 +242,7 @@ def _migrate_profile(profile, version):
             raise ValueError(
                 'max_vertical_accel_mps2: valor no numérico en el perfil anterior'
             ) from exc
-        vehicle['max_vertical_accel_mps2'] = max(0.50, previous_accel)
+        vehicle['max_vertical_accel_mps2'] = min(5.0, max(0.0, previous_accel))
         migrated['vehicle'] = vehicle
     return migrated
 

@@ -16,6 +16,7 @@ from .accessory_model import (
     percent_to_level,
 )
 from .guided_bridge import GuidedBridge
+from .manual_control_model import normalize_command_scale
 from .parameter_manager import AutopilotParameterManager
 from .telemetry_tap import TelemetryTap
 
@@ -434,6 +435,13 @@ class MavlinkBridgeNode(Node):
             Bool,
             '/uuv/deadman',
             self.deadman_callback,
+            10
+        )
+
+        self.create_subscription(
+            Float32,
+            '/uuv/control/command_scale_setpoint',
+            self.command_scale_setpoint_callback,
             10
         )
 
@@ -867,6 +875,25 @@ class MavlinkBridgeNode(Node):
     def deadman_callback(self, msg):
 
         self.deadman = msg.data
+
+    def command_scale_setpoint_callback(self, msg):
+        """Allow the owner to change the live Xbox scale while controls are neutral."""
+        try:
+            requested = normalize_command_scale(msg.data)
+        except ValueError as exc:
+            self.get_logger().warning(
+                f'Command scale rejected: {exc}'
+            )
+            return
+        if self.deadman:
+            self.get_logger().warning(
+                'Command scale rejected: release RB before changing the scale'
+            )
+            return
+        self.command_scale = requested
+        self.get_logger().warning(
+            f'Xbox/MANUAL command scale changed to {100.0 * requested:.1f}%'
+        )
 
     def camera_tilt_callback(self, msg):
 

@@ -44,6 +44,11 @@ AND modo MANUAL
 El bridge ejecuta el lazo a 20 Hz y descarta comandos con más de 0,30 s. Al
 soltar `RB`, el nodo teleop publica una orden neutra.
 
+La escala Xbox/MANUAL puede modificarse entre 0 y 100 % desde la pestaña de
+configuración. Es un ajuste temporal del bridge y solo se acepta con `RB`
+liberado. No cambia `MOT_PWM_MIN/MAX`; ambos límites se multiplican en capas
+diferentes de la cadena de mando.
+
 La potencia se infiere usando el voltaje del bus. Esto es una ayuda de software,
 no una lectura directa del killswitch ni un sustituto de la parada física.
 
