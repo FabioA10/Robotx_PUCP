@@ -27,6 +27,7 @@ def generate_launch_description():
         parameters=[{
             'operator_profile': True,
             'enable_mode_requests': mode_control,
+            'accessory_control_expected': accessory_control,
         }],
     )
     bridge = Node(

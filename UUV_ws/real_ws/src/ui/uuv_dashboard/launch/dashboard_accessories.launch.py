@@ -57,16 +57,6 @@ def generate_launch_description():
             package='uuv_teleop',
             executable='xbox_teleop_node',
             output='screen',
-            remappings=[
-                (
-                    '/uuv/control/camera_tilt',
-                    '/uuv/joystick/camera_tilt',
-                ),
-                (
-                    '/uuv/control/lights_step',
-                    '/uuv/joystick/lights_step',
-                ),
-            ],
         ),
 
         dashboard,

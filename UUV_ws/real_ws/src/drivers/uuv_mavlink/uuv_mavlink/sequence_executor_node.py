@@ -12,7 +12,15 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from .sequence_core import Limits, number, Pose, return_steps, Sequence, TIMED_KINDS
+from .sequence_core import (
+    ABSOLUTE_KINDS,
+    Limits,
+    number,
+    Pose,
+    return_steps,
+    Sequence,
+    TIMED_KINDS,
+)
 
 
 class SequenceExecutor(Node):
@@ -48,6 +56,7 @@ class SequenceExecutor(Node):
         self.total = 0
         self.action_serial = {}
         self.prepared_by = None
+        self.plan_mode = 'relative'
         self.last_output_command = None
         self.event_log = None
         self.event_log_path = None
@@ -76,7 +85,7 @@ class SequenceExecutor(Node):
         self.timer = self.create_timer(0.05, self.tick)
         self.record_event(
             'INFO', 'INICIO', 'Ejecutor de secuencias iniciado',
-            controller_revision='guided_bumpless_v3',
+            controller_revision='guided_absolute_v1',
         )
 
     def record_event(self, level, event, detail, **fields):
@@ -361,7 +370,8 @@ class SequenceExecutor(Node):
             )
         if not 0.001 <= recovery_min <= recovery_speed <= horizontal:
             raise ValueError(
-                'Velocidades de recuperación: 0.001 ≤ impulso mínimo ≤ máximo ≤ límite horizontal'
+                'Velocidades de recuperación: 0.001 ≤ impulso mínimo ≤ máximo '
+                '≤ límite horizontal'
             )
         if not 0.5 <= recovery_delay <= 10:
             raise ValueError('La demora de refuerzo debe estar entre 0.5 y 10 s')
@@ -419,16 +429,37 @@ class SequenceExecutor(Node):
                 if not 0 <= depth <= 0.5:
                     raise ValueError('Profundidad conocida del sensor: 0–0.50 m')
                 limits = self.requested_limits(p)
+                plan_mode = str(p.get('plan_mode', 'relative'))
+                if plan_mode not in ('relative', 'absolute'):
+                    raise ValueError('Modo de plan desconocido')
+                requested_steps = p['steps']
+                if plan_mode == 'absolute' and any(
+                    not isinstance(step, dict)
+                    or step.get('kind') not in ABSOLUTE_KINDS
+                    for step in requested_steps
+                ):
+                    raise ValueError('El plan absoluto solo admite puntos X-Y-Z-ángulo')
+                if plan_mode == 'relative' and any(
+                    isinstance(step, dict) and step.get('kind') in ABSOLUTE_KINDS
+                    for step in requested_steps
+                ):
+                    raise ValueError('Los puntos absolutos requieren seleccionar su ventana')
                 recent = [v for t, v in self.pressure_history if time.monotonic() - t < 1.5]
                 if len(recent) < 10 or max(recent) - min(recent) > 2:
                     raise ValueError('Presión inestable: mantén el sensor a profundidad fija')
                 pose = Pose(*f['samples']['position'][:2], depth, f['samples']['yaw'])
                 candidate = Sequence(limits)
-                parsed = candidate.validate(pose, p['steps'], pose)
+                parsed = candidate.validate(pose, requested_steps, pose)
                 self.reference = (sum(recent) / len(recent), depth, f['samples']['position'][2])
                 self.home = pose
                 self.core.limits = candidate.limits
-                self.validated = {'steps': parsed, 'returning': False, 'pose': pose}
+                self.plan_mode = plan_mode
+                self.validated = {
+                    'steps': parsed,
+                    'returning': False,
+                    'pose': pose,
+                    'plan_mode': plan_mode,
+                }
                 self.prepared_by = [ui, serial]
                 self.note = (
                     'Prueba preparada: superficie, Home y plan guardados. '
@@ -439,6 +470,7 @@ class SequenceExecutor(Node):
                     'PRUEBA_PREPARADA',
                     self.note,
                     steps=[dict(step) for step in parsed],
+                    plan_mode=plan_mode,
                     sensor_depth=depth,
                     limits=vars(limits),
                 )
@@ -501,6 +533,10 @@ class SequenceExecutor(Node):
                 if time.monotonic() - self.ui_seen.get(ui, -100) > 0.5:
                     raise ValueError('La interfaz no tiene señal de vida reciente')
                 returning = self.validated['returning']
+                if not returning and p.get('plan_mode', 'relative') != self.validated.get(
+                    'plan_mode', 'relative'
+                ):
+                    raise ValueError('Cambió el modo de plan; vuelve a preparar')
                 # Require the same GUI list that was validated; edits cannot
                 # silently execute old work.
                 if not returning:
@@ -564,8 +600,7 @@ class SequenceExecutor(Node):
                 error = 'Interfaz cerrada o sin respuesta'
             if self.feedback and self.feedback['blockers']:
                 error = '; '.join(self.feedback['blockers'])
-            timed_without_pose = self.core.timed and error == nav_error
-            if error and not timed_without_pose:
+            if error:
                 self.cancel(error)
             else:
                 velocity = self.feedback['samples'].get('velocity')
@@ -622,6 +657,9 @@ class SequenceExecutor(Node):
                 command=self.last_output_command if self.core.state == 'RUNNING' else None,
                 velocity=f.get('samples', {}).get('velocity'),
                 position_ned=f.get('samples', {}).get('position'),
+                voltage_v=f.get('samples', {}).get('voltage'),
+                current_a=f.get('samples', {}).get('current'),
+                sample_ages=f.get('sample_ages', {}),
                 mode=f.get('mode'),
                 diagnostics=f.get('diagnostics', []),
                 hold_target=f.get('hold_target'),
@@ -637,7 +675,11 @@ class SequenceExecutor(Node):
             limit = (
                 self.core.current_step['duration']
                 if self.core.timed
-                else self.core.limits.step_timeout
+                else (
+                    self.core.limits.waypoint_timeout
+                    if self.core.current_step['kind'] in ABSOLUTE_KINDS
+                    else self.core.limits.step_timeout
+                )
             )
             timeout_left = max(0, limit - (now - self.core.started))
         phase = self.phase_status(now, current, nav_error)
@@ -668,6 +710,7 @@ class SequenceExecutor(Node):
                 'nav_error': nav_error,
                 'mode': f.get('mode'),
                 'armed': f.get('armed'),
+                'connected': f.get('connected', False),
                 'enabled': f.get('enabled', False),
                 'blockers': f.get('blockers', ['Puente sin conexión']),
                 'bridge_reason': f.get('reason'),
@@ -689,6 +732,11 @@ class SequenceExecutor(Node):
                     else None
                 ),
                 'returning': self.validated['returning'] if self.validated else False,
+                'plan_mode': (
+                    self.validated.get('plan_mode', self.plan_mode)
+                    if self.validated
+                    else self.plan_mode
+                ),
                 'step': self.core.index + 1 if self.core.state == 'RUNNING' else 0,
                 'total': self.total,
                 'goal': vars(goal) if goal else None,
@@ -710,6 +758,8 @@ class SequenceExecutor(Node):
                 'command_debug': self.core.command_debug,
                 'timeout_left': timeout_left,
                 'dvl_confidence': f.get('samples', {}).get('dvl'),
+                'current_a': f.get('samples', {}).get('current'),
+                'voltage_v': f.get('samples', {}).get('voltage'),
                 'diagnostics': f.get('diagnostics', []),
                 'paused': False,
                 'pause_elapsed': None,
@@ -729,7 +779,7 @@ class SequenceExecutor(Node):
                 ),
                 'event_log_path': self.event_log_path,
                 'holding_completed_goal': f.get('holding_completed_goal', False),
-                'controller_revision': 'guided_bumpless_v3',
+                'controller_revision': 'guided_absolute_v1',
             },
         )
 
@@ -738,6 +788,12 @@ class SequenceExecutor(Node):
         if self.core.state == 'RUNNING':
             step = self.core.current_step
             kind = step['kind']
+            if current is None:
+                return {
+                    'code': 'BLOQUEADO',
+                    'title': 'SIN POSICIÓN VÁLIDA',
+                    'detail': nav_error,
+                }
             if kind in TIMED_KINDS:
                 remaining = max(0.0, step['duration'] - (now - self.core.started))
                 labels = {
@@ -750,16 +806,39 @@ class SequenceExecutor(Node):
                     f'Paso {self.core.index + 1}/{self.total} · '
                     f'{step["speed"]:.3f} · faltan {remaining:.1f} s'
                 )
-                if current is None:
-                    detail += ' · DVL/posición no disponibles; ejecución temporal continúa'
                 return {
                     'code': 'TEMPORAL',
                     'title': labels[kind],
                     'detail': detail,
                     'remaining_s': remaining,
                 }
-            if current is None:
-                return {'code': 'BLOQUEADO', 'title': 'SIN POSICIÓN VÁLIDA', 'detail': nav_error}
+            if kind in ABSOLUTE_KINDS:
+                phase = self.core.waypoint_phase or 'DEPTH'
+                labels = {
+                    'DEPTH': ('PROFUNDIDAD', 'AJUSTANDO PROFUNDIDAD DEL PUNTO'),
+                    'TRANSLATE': ('AVANCE', 'NAVEGANDO A X-Y ABSOLUTO'),
+                    'YAW': ('RUMBO', 'AJUSTANDO ÁNGULO FINAL'),
+                }
+                code, title = labels.get(
+                    phase,
+                    ('ESTABILIZANDO', 'VERIFICANDO PUNTO ABSOLUTO'),
+                )
+                debug = self.core.command_debug
+                detail = (
+                    f'Punto {self.core.index + 1}/{self.total} · fase {phase} · '
+                    f'error X {abs(debug.get("error_x", 0.0)):.3f} m · '
+                    f'Y {abs(debug.get("error_y", 0.0)):.3f} m · '
+                    f'prof. {abs(debug.get("error_depth", 0.0)):.3f} m · '
+                    f'rumbo {abs(debug.get("error_yaw_deg", 0.0)):.1f}°'
+                )
+                if self.core.inside_since is not None:
+                    remaining = max(
+                        0.0,
+                        step['dwell'] - (now - self.core.inside_since),
+                    )
+                    code = 'ESTABILIZANDO'
+                    detail += f' · confirmando {remaining:.1f} s'
+                return {'code': code, 'title': title, 'detail': detail}
             xy, depth, yaw = self.core.errors
             inside = self.core.inside_since is not None
             settling_faults = []
@@ -797,7 +876,10 @@ class SequenceExecutor(Node):
                     return {
                         'code': 'CORRIGIENDO',
                         'title': 'CORRECCIÓN FINA PARA ESPERAR',
-                        'detail': f'Paso {self.core.index + 1}/{self.total} · fuera de tolerancia',
+                        'detail': (
+                            f'Paso {self.core.index + 1}/{self.total} · '
+                            'fuera de tolerancia'
+                        ),
                     }
                 return {
                     'code': 'ESPERA',

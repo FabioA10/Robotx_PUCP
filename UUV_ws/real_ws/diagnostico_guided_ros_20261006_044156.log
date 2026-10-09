@@ -1,0 +1,82 @@
+===== NODOS =====
+/uuv_sequence_dashboard
+
+===== TÓPICOS Y TIPOS =====
+/camera/image/compressed [sensor_msgs/msg/CompressedImage]
+/parameter_events [rcl_interfaces/msg/ParameterEvent]
+/ping360/filtered_points [sensor_msgs/msg/PointCloud2]
+/ping360/points [sensor_msgs/msg/PointCloud2]
+/rosout [rcl_interfaces/msg/Log]
+/uuv/armed [std_msgs/msg/Bool]
+/uuv/connected [std_msgs/msg/Bool]
+/uuv/control/command_output_enabled [std_msgs/msg/Bool]
+/uuv/control/mavlink_motion_allowed [std_msgs/msg/Bool]
+/uuv/deadman [std_msgs/msg/Bool]
+/uuv/mode [std_msgs/msg/String]
+/uuv/power/voltage [std_msgs/msg/Float32]
+/uuv/sequence/request [std_msgs/msg/String]
+/uuv/sequence/status [std_msgs/msg/String]
+/uuv/sequence/ui_alive [std_msgs/msg/String]
+/uuv/sequence_dry_run/cancel [std_msgs/msg/Empty]
+/uuv/sequence_dry_run/request [std_msgs/msg/String]
+/uuv/sequence_dry_run/status [std_msgs/msg/String]
+/uuv/telemetry/attitude_rpy [geometry_msgs/msg/Vector3Stamped]
+/uuv/telemetry/depth_estimate_m [std_msgs/msg/Float32]
+/uuv/telemetry/ekf_status_flags [std_msgs/msg/UInt32]
+/uuv/telemetry/heading_deg [std_msgs/msg/Float32]
+/uuv/telemetry/local_position_ned [geometry_msgs/msg/PointStamped]
+/uuv/telemetry/local_velocity_ned [geometry_msgs/msg/Vector3Stamped]
+/uuv/telemetry/pressure_abs_hpa [std_msgs/msg/Float32]
+
+===== INFORMACIÓN DE NODOS RELEVANTES =====
+
+----- /uuv_sequence_dashboard -----
+/uuv_sequence_dashboard
+  Subscribers:
+    /camera/image/compressed: sensor_msgs/msg/CompressedImage
+    /ping360/filtered_points: sensor_msgs/msg/PointCloud2
+    /ping360/points: sensor_msgs/msg/PointCloud2
+    /uuv/armed: std_msgs/msg/Bool
+    /uuv/connected: std_msgs/msg/Bool
+    /uuv/control/command_output_enabled: std_msgs/msg/Bool
+    /uuv/control/mavlink_motion_allowed: std_msgs/msg/Bool
+    /uuv/deadman: std_msgs/msg/Bool
+    /uuv/mode: std_msgs/msg/String
+    /uuv/power/voltage: std_msgs/msg/Float32
+    /uuv/sequence/status: std_msgs/msg/String
+    /uuv/sequence_dry_run/status: std_msgs/msg/String
+    /uuv/telemetry/attitude_rpy: geometry_msgs/msg/Vector3Stamped
+    /uuv/telemetry/depth_estimate_m: std_msgs/msg/Float32
+    /uuv/telemetry/ekf_status_flags: std_msgs/msg/UInt32
+    /uuv/telemetry/heading_deg: std_msgs/msg/Float32
+    /uuv/telemetry/local_position_ned: geometry_msgs/msg/PointStamped
+    /uuv/telemetry/local_velocity_ned: geometry_msgs/msg/Vector3Stamped
+    /uuv/telemetry/pressure_abs_hpa: std_msgs/msg/Float32
+  Publishers:
+    /parameter_events: rcl_interfaces/msg/ParameterEvent
+    /rosout: rcl_interfaces/msg/Log
+    /uuv/sequence/request: std_msgs/msg/String
+    /uuv/sequence/ui_alive: std_msgs/msg/String
+    /uuv/sequence_dry_run/cancel: std_msgs/msg/Empty
+    /uuv/sequence_dry_run/request: std_msgs/msg/String
+  Service Servers:
+    /uuv_sequence_dashboard/describe_parameters: rcl_interfaces/srv/DescribeParameters
+    /uuv_sequence_dashboard/get_parameter_types: rcl_interfaces/srv/GetParameterTypes
+    /uuv_sequence_dashboard/get_parameters: rcl_interfaces/srv/GetParameters
+    /uuv_sequence_dashboard/get_type_description: type_description_interfaces/srv/GetTypeDescription
+    /uuv_sequence_dashboard/list_parameters: rcl_interfaces/srv/ListParameters
+    /uuv_sequence_dashboard/set_parameters: rcl_interfaces/srv/SetParameters
+    /uuv_sequence_dashboard/set_parameters_atomically: rcl_interfaces/srv/SetParametersAtomically
+  Service Clients:
+
+  Action Servers:
+
+  Action Clients:
+
+/uuv_sequence_dashboard:
+  ros__parameters:
+    enable_mode_requests: false
+    operator_profile: false
+    start_type_description_service: true
+    use_sim_time: false
+

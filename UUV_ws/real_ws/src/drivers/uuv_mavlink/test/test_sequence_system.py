@@ -113,6 +113,97 @@ class Packet(types.SimpleNamespace):
 
 
 class TestSequenceCore(unittest.TestCase):
+    @staticmethod
+    def absolute_point(**overrides):
+        point = {
+            'kind': 'absolute_waypoint',
+            'x': 0.50,
+            'y': 0.00,
+            'depth': 0.30,
+            'yaw_deg': 90.0,
+            'speed': 0.15,
+            'vertical_speed': 0.08,
+            'yaw_speed_deg': 10.0,
+            'tolerance_x': 0.04,
+            'tolerance_y': 0.04,
+            'tolerance_depth': 0.02,
+            'tolerance_yaw_deg': 5.0,
+            'dwell': 1.0,
+        }
+        point.update(overrides)
+        return point
+
+    def test_absolute_waypoint_is_fixed_to_prepared_mission_frame(self):
+        origin = Pose(3.0, 4.0, 0.10, math.radians(90))
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        core.start(origin, [self.absolute_point(x=1.0, y=0.5)], 0, origin)
+        self.assertAlmostEqual(core.goal.n, 2.5)
+        self.assertAlmostEqual(core.goal.e, 5.0)
+        self.assertAlmostEqual(core.goal.depth, 0.30)
+        self.assertAlmostEqual(abs(core.goal.yaw), math.pi)
+        self.assertEqual(core.waypoint_phase, 'DEPTH')
+
+    def test_absolute_waypoint_executes_depth_then_xy_then_final_yaw(self):
+        limits = Limits(max_depth=2.0, radius=2.0, waypoint_timeout=120.0)
+        core = Sequence(limits)
+        pose = Pose(0.0, 0.0, 0.10, 0.0)
+        core.start(pose, [self.absolute_point()], 0.0, pose)
+        phases = []
+        velocity = [0.0, 0.0, 0.0]
+        for tick in range(1, 2401):
+            command = core.update(
+                pose,
+                tick * 0.05,
+                velocity=velocity,
+            )
+            if core.state != 'RUNNING':
+                break
+            phases.append(core.waypoint_phase)
+            vn, ve, vd, yaw = command
+            velocity = [vn, ve, vd]
+            pose = Pose(
+                pose.n + vn * 0.05,
+                pose.e + ve * 0.05,
+                pose.depth + vd * 0.05,
+                yaw,
+            )
+            self.assertLessEqual(math.hypot(vn, ve), 0.150001)
+            self.assertLessEqual(abs(vd), 0.080001)
+        self.assertEqual(core.state, 'COMPLETED', core.reason)
+        first_translate = phases.index('TRANSLATE')
+        first_yaw = phases.index('YAW')
+        self.assertGreater(first_translate, phases.index('DEPTH'))
+        self.assertGreater(first_yaw, first_translate)
+        self.assertAlmostEqual(pose.depth, 0.30, delta=0.02)
+        self.assertAlmostEqual(pose.n, 0.50, delta=0.04)
+        self.assertAlmostEqual(pose.e, 0.00, delta=0.04)
+        self.assertAlmostEqual(pose.yaw, math.radians(90), delta=math.radians(5))
+
+    def test_absolute_waypoint_pauses_xy_when_depth_leaves_band(self):
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        core.start(origin, [self.absolute_point()], 0.0, origin)
+        self.assertEqual(core.waypoint_phase, 'TRANSLATE')
+        command = core.update(
+            Pose(0.10, 0.0, 0.34, 0.0),
+            0.05,
+            velocity=[0.02, 0.0, 0.0],
+        )
+        self.assertEqual(core.waypoint_phase, 'DEPTH')
+        self.assertLessEqual(math.hypot(command[0], command[1]), 0.0061)
+        self.assertLess(command[2], 0.0)
+
+    def test_absolute_waypoint_rejects_unsafe_geometry_and_tolerances(self):
+        core = Sequence(Limits(max_depth=1.0, radius=0.5))
+        for point in (
+            self.absolute_point(x=0.6),
+            self.absolute_point(depth=1.1),
+            self.absolute_point(tolerance_x=0.001),
+            self.absolute_point(tolerance_yaw_deg=30.0),
+        ):
+            with self.subTest(point=point), self.assertRaises(ValueError):
+                core.validate(Pose(0, 0, 0.2, 0), [point])
+
     def test_absolute_depth_and_relative_turn_from_new_pose(self):
         core = Sequence(Limits(max_depth=3, radius=5))
         core.start(Pose(10, 20, 1, math.pi / 2), [('advance', 1), ('depth', 2)], 0)
@@ -218,7 +309,7 @@ class TestSequenceCore(unittest.TestCase):
         core.index = 1
         core.begin_step(pose, 1.0)
         core.last_time = 1.0
-        command = core.update(None, 1.05)
+        command = core.update(pose, 1.05)
         self.assertAlmostEqual(command[0], 0.10)
         self.assertAlmostEqual(command[1], 0.0)
         self.assertEqual(core.state, 'RUNNING')
@@ -228,7 +319,7 @@ class TestSequenceCore(unittest.TestCase):
             [{'kind': 'velocity_surge', 'speed': 0.21, 'duration': 1}],
             [{'kind': 'velocity_heave', 'speed': 0.11, 'duration': 1}],
             [{'kind': 'velocity_yaw', 'speed': math.radians(11), 'duration': 1}],
-            [{'kind': 'velocity_surge', 'speed': 0.1, 'duration': 31}],
+            [{'kind': 'velocity_surge', 'speed': 0.1, 'duration': 5.1}],
         ):
             with self.assertRaises(ValueError):
                 Sequence().validate(Pose(0, 0, 0, 0), steps)
@@ -240,8 +331,29 @@ class TestSequenceCore(unittest.TestCase):
             {'kind': 'velocity_heave', 'speed': -0.3, 'duration': 1},
             {'kind': 'velocity_yaw', 'speed': math.radians(40), 'duration': 1},
         ]
-        parsed = Sequence(limits).validate(Pose(0, 0, 0, 0), steps)
+        parsed = Sequence(limits).validate(Pose(0, 0, 1.0, 0), steps)
         self.assertEqual(parsed, steps)
+
+    def test_timed_plan_includes_braking_margin_in_bounds(self):
+        limits = Limits(radius=0.5, horizontal_speed=0.2)
+        steps = [
+            {'kind': 'velocity_surge', 'speed': 0.1, 'duration': 5.0},
+        ]
+        with self.assertRaisesRegex(ValueError, 'radio'):
+            Sequence(limits).validate(Pose(0, 0, 0.2, 0), steps)
+
+    def test_timed_motion_cancels_if_pose_is_lost_or_exits_bounds(self):
+        pose = Pose(0, 0, 0.2, 0)
+        step = [{'kind': 'velocity_surge', 'speed': 0.1, 'duration': 1.0}]
+        core = Sequence()
+        core.start(pose, step, 0)
+        self.assertIsNone(core.update(None, 0.05))
+        self.assertEqual(core.state, 'CANCELLED')
+
+        core = Sequence(Limits(radius=0.5))
+        core.start(pose, step, 0)
+        self.assertIsNone(core.update(Pose(0.6, 0, 0.2, 0), 0.05))
+        self.assertEqual(core.state, 'CANCELLED')
 
     def test_low_requested_speed_is_preserved_when_vehicle_responds(self):
         core = Sequence(Limits(recovery_delay=1.0))
@@ -1014,6 +1126,31 @@ class TestExecutor(unittest.TestCase):
         self.assertEqual(self.ex.command_pub.messages, [])
         self.assertEqual(self.ex.action_pub.messages, [])
 
+    def test_prepare_and_execute_absolute_plan_keep_fixed_home_origin(self):
+        point = TestSequenceCore.absolute_point(x=0.5, y=0.25, depth=0.3)
+        self.req('prepare', plan_mode='absolute', steps=[point])
+        self.assertIsNotNone(self.ex.validated, self.ex.note)
+        self.assertEqual(self.ex.validated['plan_mode'], 'absolute')
+        self.assertEqual(self.ex.plan_mode, 'absolute')
+        self.f['samples']['position'] = [0.08, -0.03, 0.0]
+        self.f.update(armed=True, mode='GUIDED', enabled=True, blockers=[])
+        self.advance()
+        self.ui()
+        self.req('execute', plan_mode='absolute', steps=[point])
+        self.assertEqual(self.ex.core.state, 'RUNNING', self.ex.note)
+        self.assertAlmostEqual(self.ex.core.goal.n, 0.5)
+        self.assertAlmostEqual(self.ex.core.goal.e, 0.25)
+        self.assertEqual(self.ex.core.waypoint_phase, 'DEPTH')
+
+    def test_prepare_rejects_mixed_or_mislabeled_absolute_plan(self):
+        point = TestSequenceCore.absolute_point()
+        self.req('prepare', plan_mode='absolute', steps=[point, ['wait', 1]])
+        self.assertIsNone(self.ex.validated)
+        for _ in range(45):
+            self.advance()
+        self.req('prepare', plan_mode='relative', steps=[point])
+        self.assertIsNone(self.ex.validated)
+
     def test_prepare_accepts_operator_motion_limits(self):
         self.req(
             'prepare',
@@ -1217,8 +1354,9 @@ class TestExecutor(unittest.TestCase):
         self.ex.core = timed
         self.ex.total = 1
         phase = self.ex.phase_status(self.now + 0.05, None, 'posición no disponible')
+        self.assertEqual(phase['code'], 'BLOQUEADO')
+        phase = self.ex.phase_status(self.now + 0.05, pose, '')
         self.assertEqual(phase['code'], 'TEMPORAL')
-        self.assertIn('continúa', phase['detail'])
 
         core = Sequence()
         core.start(pose, [('wait', 3)], self.now)

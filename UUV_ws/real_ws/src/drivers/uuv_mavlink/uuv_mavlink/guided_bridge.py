@@ -372,8 +372,11 @@ class GuidedBridge:
                 self.put('pressure', number(msg.press_abs), int(msg.time_boot_ms))
             elif kind == 'EKF_STATUS_REPORT':
                 self.put('ekf', int(msg.flags))
-            elif kind == 'SYS_STATUS' and msg.voltage_battery != 65535:
-                self.put('voltage', float(msg.voltage_battery) / 1000)
+            elif kind == 'SYS_STATUS':
+                if msg.voltage_battery != 65535:
+                    self.put('voltage', float(msg.voltage_battery) / 1000)
+                if msg.current_battery >= 0:
+                    self.put('current', float(msg.current_battery) / 100)
             elif kind == 'GPS_GLOBAL_ORIGIN':
                 origin = (int(msg.latitude), int(msg.longitude), int(msg.altitude))
                 if self.origin is not None and self.origin != origin:
@@ -1018,11 +1021,15 @@ class GuidedBridge:
                 'guided_settling': self.guided_settle_started is not None,
                 'hold_target': list(self.hold_target) if self.hold_target is not None else None,
                 'holding_completed_goal': self.holding_completed_goal,
-                'controller_revision': 'guided_bumpless_v3',
+                'controller_revision': 'guided_safety_v4',
                 'dvl_input': self.dvl_input,
                 'samples': {
                     k: self.get(k, 1.5 if k == 'dvl' else self.navigation_sample_timeout)
                     for k in self.samples
+                },
+                'sample_ages': {
+                    k: max(0.0, now - stamp)
+                    for k, (_value, stamp) in self.samples.items()
                 },
             }
             out = String()

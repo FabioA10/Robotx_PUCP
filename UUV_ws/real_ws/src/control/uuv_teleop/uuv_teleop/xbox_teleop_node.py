@@ -1,11 +1,11 @@
+import json
 import time
 
+from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.node import Node
-
 from sensor_msgs.msg import Joy
-from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool, Empty, Float32, Int8
+from std_msgs.msg import Bool, Empty, Float32, Int8, String
 
 
 class XboxTeleopNode(Node):
@@ -91,14 +91,12 @@ class XboxTeleopNode(Node):
         # State
         # =========================================================
 
-
         # =========================================================
         # ArduSub operational mode sequence
         #
         # MOTOR_DETECT intentionally excluded because it is
         # a motor configuration/detection routine.
         # =========================================================
-
 
         self.arm_hold_start = None
         self.arm_request_sent = False
@@ -156,6 +154,12 @@ class XboxTeleopNode(Node):
             10
         )
 
+        self.input_status_pub = self.create_publisher(
+            String,
+            '/uuv/input/xbox_status',
+            10
+        )
+
         # =========================================================
         # Subscriber
         # =========================================================
@@ -166,8 +170,6 @@ class XboxTeleopNode(Node):
             self.joy_callback,
             10
         )
-
-
 
         # =========================================================
         # Startup information
@@ -201,10 +203,7 @@ class XboxTeleopNode(Node):
             'D-pad LEFT/RIGHT -> lights -/+ 10%.'
         )
 
-
-
-
-    # =============================================================     -------------------------------------------------------------------
+    # =============================================================
     # Helpers
     # =============================================================
 
@@ -228,6 +227,12 @@ class XboxTeleopNode(Node):
             and abs(msg.axes[self.AXIS_LT]) < self.deadzone
             and abs(msg.axes[self.AXIS_RT]) < self.deadzone
         )
+
+    def publish_input_status(self, **status):
+        """Expose why an Xbox accessory gesture is accepted or blocked."""
+        message = String()
+        message.data = json.dumps(status, allow_nan=False)
+        self.input_status_pub.publish(message)
 
     # =============================================================
     # Joy callback
@@ -256,6 +261,11 @@ class XboxTeleopNode(Node):
             self.arm_hold_start = None
             self.arm_request_sent = False
 
+            self.publish_input_status(
+                valid=False,
+                blocker='El mensaje Joy no contiene los seis ejes esperados',
+            )
+
             return
 
         if len(msg.buttons) <= self.BUTTON_DPAD_RIGHT:
@@ -272,6 +282,11 @@ class XboxTeleopNode(Node):
 
             self.arm_hold_start = None
             self.arm_request_sent = False
+
+            self.publish_input_status(
+                valid=False,
+                blocker='El mensaje Joy no contiene los quince botones esperados',
+            )
 
             return
 
@@ -354,7 +369,6 @@ class XboxTeleopNode(Node):
             self.controls_are_neutral(msg)
         )
 
-
         # =========================================================
         # MODE SELECTION
         #
@@ -373,7 +387,6 @@ class XboxTeleopNode(Node):
             and not b_pressed
             and controls_neutral
         )
-
 
         if mode_change_allowed:
 
@@ -397,7 +410,6 @@ class XboxTeleopNode(Node):
                     'NEXT mode requested from Xbox'
                 )
 
-
             # -----------------------------------------------------
             # PREVIOUS MODE
             # -----------------------------------------------------
@@ -417,7 +429,6 @@ class XboxTeleopNode(Node):
                 self.get_logger().warning(
                     'PREVIOUS mode requested from Xbox'
                 )
-
 
         self.previous_dpad_up_pressed = (
             dpad_up_pressed
@@ -440,6 +451,28 @@ class XboxTeleopNode(Node):
             and not rb_pressed
             and not b_pressed
             and controls_neutral
+        )
+
+        blockers = []
+        if lb_pressed:
+            blockers.append('LB reservado para cambio de modo')
+        if rb_pressed:
+            blockers.append('RB reservado para movimiento')
+        if b_pressed:
+            blockers.append('B solicita desarmado')
+        if not controls_neutral:
+            blockers.append('sticks o gatillos fuera de neutro')
+        self.publish_input_status(
+            valid=True,
+            accessory_allowed=accessory_control_allowed,
+            blocker='; '.join(blockers),
+            lb=lb_pressed,
+            rb=rb_pressed,
+            controls_neutral=controls_neutral,
+            dpad_up=dpad_up_pressed,
+            dpad_down=dpad_down_pressed,
+            dpad_left=dpad_left_pressed,
+            dpad_right=dpad_right_pressed,
         )
 
         camera_msg = Float32()
@@ -470,8 +503,6 @@ class XboxTeleopNode(Node):
 
         self.previous_dpad_left_pressed = dpad_left_pressed
         self.previous_dpad_right_pressed = dpad_right_pressed
-
-
 
         arm_conditions = (
             x_pressed

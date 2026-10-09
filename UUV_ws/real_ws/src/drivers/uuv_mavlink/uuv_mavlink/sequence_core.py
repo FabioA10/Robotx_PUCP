@@ -38,7 +38,9 @@ class Limits:
     yaw_tolerance: float = math.radians(5)
     dwell: float = 1.0
     step_timeout: float = 60.0
-    timed_motion_limit: float = 30.0
+    wait_limit: float = 30.0
+    timed_motion_limit: float = 5.0
+    timed_braking_time: float = 1.0
     settle_speed: float = 0.03
     hold_horizontal_speed: float = 0.10
     hold_vertical_speed: float = 0.05
@@ -50,6 +52,9 @@ class Limits:
     recovery_delay: float = 2.0
     response_ratio: float = 0.35
     velocity_filter_tau: float = 0.25
+    waypoint_timeout: float = 120.0
+    waypoint_horizontal_accel: float = 0.12
+    waypoint_vertical_accel: float = 0.08
 
     def __post_init__(self):
         for value in vars(self).values():
@@ -67,7 +72,8 @@ class Limits:
 
 POSITION_KINDS = {'advance', 'lateral', 'turn', 'depth'}
 TIMED_KINDS = {'velocity_surge', 'velocity_sway', 'velocity_heave', 'velocity_yaw'}
-ALL_KINDS = POSITION_KINDS | TIMED_KINDS | {'wait'}
+ABSOLUTE_KINDS = {'absolute_waypoint'}
+ALL_KINDS = POSITION_KINDS | TIMED_KINDS | ABSOLUTE_KINDS | {'wait'}
 
 
 def _legacy_step(item):
@@ -94,9 +100,80 @@ def parse_steps(steps, limits=None):
         if kind not in ALL_KINDS:
             raise ValueError('Tipo de paso desconocido')
         normalized = {'kind': kind}
-        if kind == 'wait':
+        if kind == 'absolute_waypoint':
+            x = number(item.get('x'))
+            y = number(item.get('y'))
+            depth = number(item.get('depth'))
+            yaw_deg = number(
+                item['yaw_deg']
+                if 'yaw_deg' in item
+                else math.degrees(item.get('yaw'))
+            )
+            speed = abs(number(item.get('speed', min(0.15, limits.horizontal_speed))))
+            vertical_speed = abs(
+                number(item.get('vertical_speed', min(0.08, limits.vertical_speed)))
+            )
+            yaw_speed_deg = abs(
+                number(
+                    item['yaw_speed_deg']
+                    if 'yaw_speed_deg' in item
+                    else (
+                        math.degrees(item['yaw_speed'])
+                        if 'yaw_speed' in item
+                        else min(10.0, math.degrees(limits.yaw_speed))
+                    )
+                )
+            )
+            tolerance_x = number(item.get('tolerance_x', 0.04))
+            tolerance_y = number(item.get('tolerance_y', 0.04))
+            tolerance_depth = number(item.get('tolerance_depth', limits.depth_tolerance))
+            tolerance_yaw_deg = number(
+                item['tolerance_yaw_deg']
+                if 'tolerance_yaw_deg' in item
+                else (
+                    math.degrees(item['tolerance_yaw'])
+                    if 'tolerance_yaw' in item
+                    else math.degrees(limits.yaw_tolerance)
+                )
+            )
+            dwell = number(item.get('dwell', limits.dwell))
+            if math.hypot(x, y) > limits.radius + 1e-9:
+                raise ValueError('El punto absoluto supera el radio de la sesión')
+            if not 0 <= depth <= limits.max_depth:
+                raise ValueError('La profundidad del punto absoluto está fuera del límite')
+            if not -180 <= yaw_deg <= 180:
+                raise ValueError('El rumbo absoluto debe estar entre -180 y 180 grados')
+            if not 0 < speed <= limits.horizontal_speed:
+                raise ValueError('La velocidad XY del punto supera el límite horizontal')
+            if not 0 < vertical_speed <= limits.vertical_speed:
+                raise ValueError('La velocidad vertical del punto supera el límite vertical')
+            if not 0 < yaw_speed_deg <= math.degrees(limits.yaw_speed) + 1e-9:
+                raise ValueError('La velocidad angular del punto supera el límite de giro')
+            if not 0.01 <= tolerance_x <= 0.15 or not 0.01 <= tolerance_y <= 0.15:
+                raise ValueError('Las tolerancias X/Y deben estar entre 0.01 y 0.15 m')
+            if not 0.005 <= tolerance_depth <= 0.10:
+                raise ValueError('La tolerancia de profundidad debe estar entre 0.005 y 0.10 m')
+            if not 1.0 <= tolerance_yaw_deg <= 20.0:
+                raise ValueError('La tolerancia angular debe estar entre 1 y 20 grados')
+            if not 0.5 <= dwell <= 5.0:
+                raise ValueError('La confirmación estable debe estar entre 0.5 y 5 s')
+            normalized.update(
+                x=x,
+                y=y,
+                depth=depth,
+                yaw=math.radians(yaw_deg),
+                speed=speed,
+                vertical_speed=vertical_speed,
+                yaw_speed=math.radians(yaw_speed_deg),
+                tolerance_x=tolerance_x,
+                tolerance_y=tolerance_y,
+                tolerance_depth=tolerance_depth,
+                tolerance_yaw=math.radians(tolerance_yaw_deg),
+                dwell=dwell,
+            )
+        elif kind == 'wait':
             duration = number(item.get('duration'))
-            if not 0 <= duration <= limits.timed_motion_limit:
+            if not 0 <= duration <= limits.wait_limit:
                 raise ValueError('La espera está fuera del rango permitido')
             normalized['duration'] = duration
         elif kind in TIMED_KINDS:
@@ -112,8 +189,13 @@ def parse_steps(steps, limits=None):
             if abs(speed) > speed_limit + 1e-9:
                 unit = 'rad/s' if kind == 'velocity_yaw' else 'm/s'
                 raise ValueError(f'Velocidad temporal fuera del límite ({speed_limit:g} {unit})')
+            if abs(speed) < 1e-9:
+                raise ValueError('La velocidad temporal no puede ser cero')
             if not 0 < duration <= limits.timed_motion_limit:
-                raise ValueError('La duración debe ser mayor que cero y no superar 30 s')
+                raise ValueError(
+                    'La duración debe ser mayor que cero y no superar '
+                    f'{limits.timed_motion_limit:g} s'
+                )
             normalized.update(speed=speed, duration=duration)
         else:
             value = number(item.get('value'))
@@ -152,6 +234,40 @@ def goal_for(pose, step):
     return Pose(n, e, d, yaw)
 
 
+def absolute_goal(anchor, step):
+    """Convert mission-frame X/Y/depth/yaw into the fixed local NED frame."""
+    x, y = step['x'], step['y']
+    cosine, sine = math.cos(anchor.yaw), math.sin(anchor.yaw)
+    return Pose(
+        anchor.n + x * cosine - y * sine,
+        anchor.e + x * sine + y * cosine,
+        step['depth'],
+        wrap(anchor.yaw + step['yaw']),
+    )
+
+
+def projected_timed_goal(pose, step, braking_time):
+    """Return a conservative endpoint including one braking-time margin."""
+    kind = step['kind']
+    speed = step['speed']
+    duration = step['duration']
+    travel_time = duration + braking_time
+    n, e, depth, yaw = pose.n, pose.e, pose.depth, pose.yaw
+    if kind == 'velocity_surge':
+        distance = speed * travel_time
+        n += distance * math.cos(yaw)
+        e += distance * math.sin(yaw)
+    elif kind == 'velocity_sway':
+        distance = speed * travel_time
+        n -= distance * math.sin(yaw)
+        e += distance * math.cos(yaw)
+    elif kind == 'velocity_heave':
+        depth += speed * travel_time
+    elif kind == 'velocity_yaw':
+        yaw = wrap(yaw + speed * duration)
+    return Pose(n, e, depth, yaw)
+
+
 class Sequence:
     def __init__(self, limits=None):
         self.limits = limits or Limits()
@@ -178,6 +294,10 @@ class Sequence:
         self.filtered_velocity = (0.0, 0.0, 0.0)
         self.measured_speed = 0.0
         self.command_debug = {}
+        self.waypoint_phase = None
+        self.waypoint_hold = None
+        self.waypoint_transit_yaw = None
+        self.last_linear_command = (0.0, 0.0, 0.0)
 
     @property
     def current_step(self):
@@ -199,8 +319,18 @@ class Sequence:
         self.check_bounds(pose, anchor, self.limits.depth_tolerance)
         goal = pose
         for step in parsed:
-            if step['kind'] in POSITION_KINDS:
+            if step['kind'] in ABSOLUTE_KINDS:
+                goal = absolute_goal(anchor, step)
+                self.check_bounds(goal, anchor)
+            elif step['kind'] in POSITION_KINDS:
                 goal = goal_for(goal, step)
+                self.check_bounds(goal, anchor)
+            elif step['kind'] in TIMED_KINDS:
+                goal = projected_timed_goal(
+                    goal,
+                    step,
+                    self.limits.timed_braking_time,
+                )
                 self.check_bounds(goal, anchor)
         return parsed
 
@@ -226,7 +356,11 @@ class Sequence:
         # Carry the commanded pose between discrete steps. A measured residual
         # must not become the requested depth, heading or lateral position.
         reference = self.reference_target or pose
-        self.goal = goal_for(reference, step)
+        self.goal = (
+            absolute_goal(self.anchor, step)
+            if step['kind'] in ABSOLUTE_KINDS
+            else goal_for(reference, step)
+        )
         if self.home_target:
             h = self.home_target
             kind = step['kind']
@@ -241,7 +375,7 @@ class Sequence:
                     else math.atan2(h.e - reference.e, h.n - reference.n)
                 )
                 self.goal = Pose(reference.n, reference.e, h.depth, yaw)
-        if step['kind'] in POSITION_KINDS:
+        if step['kind'] in POSITION_KINDS | ABSOLUTE_KINDS:
             self.check_bounds(self.goal, self.anchor)
         self.started = now
         self.inside_since = None
@@ -252,6 +386,12 @@ class Sequence:
         self.slow_since = None
         self.filtered_velocity = (0.0, 0.0, 0.0)
         self.command_debug = {}
+        self.waypoint_phase = None
+        self.waypoint_hold = None
+        self.waypoint_transit_yaw = None
+        self.last_linear_command = (0.0, 0.0, 0.0)
+        if step['kind'] in ABSOLUTE_KINDS:
+            self._select_waypoint_phase(pose, now)
 
     def cancel(self, reason):
         self.state = 'CANCELLED'
@@ -267,6 +407,10 @@ class Sequence:
         self.recovery_boost_along = False
         self.slow_since = None
         self.command_debug = {}
+        self.waypoint_phase = None
+        self.waypoint_hold = None
+        self.waypoint_transit_yaw = None
+        self.last_linear_command = (0.0, 0.0, 0.0)
 
     def hold(self, now):
         if self.state != 'RUNNING':
@@ -358,6 +502,171 @@ class Sequence:
                 self.recovery_reason = ''
         self.control_mode = 'RECOVERY' if self.recovery_active else 'PRECISION'
 
+    def _mission_errors(self, pose):
+        """Return goal error expressed in the fixed mission X/Y axes."""
+        dn, de = self.goal.n - pose.n, self.goal.e - pose.e
+        cosine, sine = math.cos(self.anchor.yaw), math.sin(self.anchor.yaw)
+        return (
+            dn * cosine + de * sine,
+            -dn * sine + de * cosine,
+            self.goal.depth - pose.depth,
+            wrap(self.goal.yaw - pose.yaw),
+        )
+
+    def _enter_waypoint_phase(self, phase, pose, now):
+        self.waypoint_phase = phase
+        self.inside_since = None
+        self.slow_since = None
+        self.recovery_active = False
+        self.recovery_boost_along = False
+        self.recovery_reason = ''
+        self.control_mode = 'ABSOLUTE_' + phase
+        if phase == 'DEPTH':
+            self.waypoint_hold = Pose(pose.n, pose.e, self.goal.depth, pose.yaw)
+            self.waypoint_transit_yaw = pose.yaw
+        elif phase == 'TRANSLATE':
+            self.waypoint_hold = None
+            self.waypoint_transit_yaw = pose.yaw
+        else:
+            self.waypoint_hold = self.goal
+        self.last_linear_command = (0.0, 0.0, 0.0)
+        self.command_debug = {'waypoint_phase': phase, 'phase_started': now}
+
+    def _select_waypoint_phase(self, pose, now):
+        step = self.current_step
+        ex, ey, ez, eyaw = self._mission_errors(pose)
+        if abs(ez) > step['tolerance_depth']:
+            phase = 'DEPTH'
+        elif abs(ex) > step['tolerance_x'] or abs(ey) > step['tolerance_y']:
+            phase = 'TRANSLATE'
+        else:
+            phase = 'YAW'
+        self._enter_waypoint_phase(phase, pose, now)
+        self.yaw_command = pose.yaw
+
+    @staticmethod
+    def _slew_vector(previous, requested, maximum_delta):
+        delta = tuple(new - old for old, new in zip(previous, requested))
+        magnitude = math.sqrt(sum(value * value for value in delta))
+        if magnitude <= maximum_delta or magnitude <= 1e-12:
+            return requested
+        scale = maximum_delta / magnitude
+        return tuple(old + value * scale for old, value in zip(previous, delta))
+
+    def _waypoint_command(self, pose, step, now, dt, filtered_velocity):
+        """Control one fixed mission waypoint in depth, XY, yaw and verify phases."""
+        ex, ey, ez, eyaw = self._mission_errors(pose)
+        vn_measured, ve_measured, vd_measured = filtered_velocity
+        horizontal_speed = math.hypot(vn_measured, ve_measured)
+        xy = math.hypot(self.goal.n - pose.n, self.goal.e - pose.e)
+        self.errors = (xy, abs(ez), abs(math.degrees(eyaw)))
+        depth_enter = step['tolerance_depth'] + max(0.01, 0.5 * step['tolerance_depth'])
+        x_enter = step['tolerance_x'] + max(0.02, 0.5 * step['tolerance_x'])
+        y_enter = step['tolerance_y'] + max(0.02, 0.5 * step['tolerance_y'])
+
+        if self.waypoint_phase != 'DEPTH' and abs(ez) > depth_enter:
+            self._enter_waypoint_phase('DEPTH', pose, now)
+        elif self.waypoint_phase == 'YAW' and (abs(ex) > x_enter or abs(ey) > y_enter):
+            self._enter_waypoint_phase('TRANSLATE', pose, now)
+
+        depth_stable = (
+            abs(ez) <= step['tolerance_depth']
+            and abs(vd_measured) <= self.limits.settle_speed
+        )
+        xy_stable = (
+            abs(ex) <= step['tolerance_x']
+            and abs(ey) <= step['tolerance_y']
+            and horizontal_speed <= self.limits.settle_speed
+        )
+        yaw_stable = abs(eyaw) <= step['tolerance_yaw']
+
+        if self.waypoint_phase == 'DEPTH':
+            phase_inside = depth_stable
+        elif self.waypoint_phase == 'TRANSLATE':
+            phase_inside = depth_stable and xy_stable
+        else:
+            phase_inside = depth_stable and xy_stable and yaw_stable
+        if phase_inside:
+            if self.inside_since is None:
+                self.inside_since = now
+        else:
+            self.inside_since = None
+
+        if self.inside_since is not None and now - self.inside_since >= step['dwell']:
+            if self.waypoint_phase == 'DEPTH':
+                next_phase = 'TRANSLATE' if not xy_stable else 'YAW'
+                self._enter_waypoint_phase(next_phase, pose, now)
+            elif self.waypoint_phase == 'TRANSLATE':
+                self._enter_waypoint_phase('YAW', pose, now)
+            else:
+                return self._advance_step(pose, now)
+
+        phase = self.waypoint_phase
+        if phase == 'DEPTH':
+            horizontal_target = self.waypoint_hold or pose
+            horizontal_limit = min(0.05, self.limits.hold_horizontal_speed)
+            vn, ve = self._horizontal_pd(
+                horizontal_target.n - pose.n,
+                horizontal_target.e - pose.e,
+                vn_measured,
+                ve_measured,
+                horizontal_limit,
+            )
+            vertical_limit = step['vertical_speed']
+            yaw_target = self.waypoint_transit_yaw
+        elif phase == 'TRANSLATE':
+            vn, ve = self._horizontal_pd(
+                self.goal.n - pose.n,
+                self.goal.e - pose.e,
+                vn_measured,
+                ve_measured,
+                step['speed'],
+            )
+            vertical_limit = min(step['vertical_speed'], self.limits.hold_vertical_speed)
+            yaw_target = self.waypoint_transit_yaw
+        else:
+            hold_limit = min(0.06, self.limits.hold_horizontal_speed, step['speed'])
+            vn, ve = self._horizontal_pd(
+                self.goal.n - pose.n,
+                self.goal.e - pose.e,
+                vn_measured,
+                ve_measured,
+                hold_limit,
+            )
+            vertical_limit = min(step['vertical_speed'], self.limits.hold_vertical_speed)
+            yaw_target = self.goal.yaw
+        vd = self._pd(ez, vd_measured, vertical_limit)
+
+        previous = self.last_linear_command
+        horizontal = self._slew_vector(
+            previous[:2],
+            (vn, ve),
+            self.limits.waypoint_horizontal_accel * dt,
+        )
+        vertical_delta = self.limits.waypoint_vertical_accel * dt
+        vd = previous[2] + self._clamp(vd - previous[2], vertical_delta)
+        vn, ve = horizontal
+        self.last_linear_command = (vn, ve, vd)
+
+        delta = wrap(yaw_target - self.yaw_command)
+        yaw_limit = step['yaw_speed'] * dt
+        self.yaw_command = wrap(self.yaw_command + self._clamp(delta, yaw_limit))
+        self.command_debug = {
+            'waypoint_phase': phase,
+            'error_x': ex,
+            'error_y': ey,
+            'error_depth': ez,
+            'error_yaw_deg': math.degrees(eyaw),
+            'tolerance_x': step['tolerance_x'],
+            'tolerance_y': step['tolerance_y'],
+            'tolerance_depth': step['tolerance_depth'],
+            'tolerance_yaw_deg': math.degrees(step['tolerance_yaw']),
+            'depth_stable': depth_stable,
+            'xy_stable': xy_stable,
+            'yaw_stable': yaw_stable,
+        }
+        return (vn, ve, vd, self.yaw_command)
+
     def _advance_step(self, pose, now):
         was_timed = self.timed
         # Timed commands intentionally do not specify a final position. Only
@@ -401,12 +710,10 @@ class Sequence:
         if not valid:
             self.cancel(reason)
             return None
-        if pose is not None:
-            self.last_pose = pose
-        pose = pose or self.last_pose
         if pose is None:
-            self.cancel('No existe una referencia para el control')
+            self.cancel('Posición actual no disponible; movimiento cancelado')
             return None
+        self.last_pose = pose
         if self.last_time is None or not 0 <= now - self.last_time <= 0.5:
             self.cancel('Interrupción del bucle de control')
             return None
@@ -424,18 +731,25 @@ class Sequence:
         )
         self.measured_speed = measured_speed
         step = self.current_step
-        if step['kind'] in TIMED_KINDS:
-            if now - self.started >= step['duration']:
-                return self._advance_step(pose, now)
-            return self._timed_command(step, pose, dt)
         try:
             self.check_bounds(pose, self.anchor, self.limits.depth_tolerance)
         except ValueError as exc:
             self.cancel(str(exc))
             return None
-        if now - self.started > self.limits.step_timeout:
+        if step['kind'] in TIMED_KINDS:
+            if now - self.started >= step['duration']:
+                return self._advance_step(pose, now)
+            return self._timed_command(step, pose, dt)
+        timeout = (
+            self.limits.waypoint_timeout
+            if step['kind'] in ABSOLUTE_KINDS
+            else self.limits.step_timeout
+        )
+        if now - self.started > timeout:
             self.cancel('Tiempo máximo del paso superado')
             return None
+        if step['kind'] in ABSOLUTE_KINDS:
+            return self._waypoint_command(pose, step, now, dt, filtered_velocity)
         goal = self.goal
         dn, de, dd = goal.n - pose.n, goal.e - pose.e, goal.depth - pose.depth
         dyaw = wrap(goal.yaw - pose.yaw)

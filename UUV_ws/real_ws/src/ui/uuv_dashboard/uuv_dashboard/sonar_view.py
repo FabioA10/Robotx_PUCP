@@ -15,6 +15,7 @@ from python_qt_binding.QtWidgets import (
 )
 
 from .sonar_model import decode_xy_intensity
+from .theme import set_widget_state
 
 
 class SonarCanvas(QWidget):
@@ -55,7 +56,7 @@ class SonarCanvas(QWidget):
             QPointF(center.x(), center.y() + radius_px),
         )
         painter.setPen(QColor('#9fcbd4'))
-        painter.drawText(int(center.x() - 24), 20, 'FRENTE')
+        painter.drawText(int(center.x() - 62), 20, 'FRENTE (según montaje)')
 
         if not self.points or self.age_s is None or self.age_s > self.persistence_s:
             painter.setPen(QColor('#b9c3c9'))
@@ -98,10 +99,26 @@ class SonarCanvas(QWidget):
 class SonarView(QWidget):
     """Controls, liveness state and drawing for raw/filtered sonar clouds."""
 
-    def __init__(self, parent=None):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        expected=False,
+        acquisition_range_m=5.0,
+        filter_radius_m=2.0,
+        acquisition_threshold=1.0,
+        filter_threshold=90.0,
+        angle_step=4,
+    ):
         super().__init__(parent)
         self.frames = {}
         self._last_refresh = 0.0
+        self.expected = bool(expected)
+        self.acquisition_range_m = float(acquisition_range_m)
+        self.filter_radius_m = float(filter_radius_m)
+        self.acquisition_threshold = float(acquisition_threshold)
+        self.filter_threshold = float(filter_threshold)
+        self.angle_step = int(angle_step)
 
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
@@ -116,7 +133,9 @@ class SonarView(QWidget):
         self.range_m.setRange(0.5, 50.0)
         self.range_m.setDecimals(1)
         self.range_m.setSingleStep(0.5)
-        self.range_m.setValue(5.0)
+        self.range_m.setValue(
+            min(self.acquisition_range_m, max(2.5, self.filter_radius_m))
+        )
         controls.addWidget(self.range_m)
 
         controls.addWidget(QLabel('Persistencia [s]'))
@@ -135,6 +154,17 @@ class SonarView(QWidget):
         controls.addWidget(self.min_intensity)
         layout.addLayout(controls)
 
+        self.settings = QLabel(
+            f'Adquisición: {self.acquisition_range_m:g} m · '
+            f'paso angular {self.angle_step} · umbral {self.acquisition_threshold:g} · '
+            f'filtro: radio {self.filter_radius_m:g} m · '
+            f'intensidad mínima {self.filter_threshold:g} · '
+            'los controles superiores solo cambian la visualización'
+        )
+        self.settings.setObjectName('MutedText')
+        self.settings.setWordWrap(True)
+        layout.addWidget(self.settings)
+
         self.status = QLabel('Ping360: esperando publicador…')
         self.status.setObjectName('TelemetryValue')
         self.status.setWordWrap(True)
@@ -149,8 +179,6 @@ class SonarView(QWidget):
         self.min_intensity.valueChanged.connect(self.refresh)
 
     def receive(self, source, msg):
-        if source != self.source.currentData():
-            return
         self.frames[source] = (decode_xy_intensity(msg), time.monotonic())
 
     def refresh(self, *_args):
@@ -167,9 +195,23 @@ class SonarView(QWidget):
         if frame is None:
             self.canvas.points = []
             self.canvas.age_s = None
-            self.status.setText(
-                f'Ping360: sin mensajes de la fuente {self.source.currentText().lower()}'
-            )
+            if not self.expected:
+                self.status.setText('Ping360 deshabilitado por sonar:=false')
+                set_widget_state(self.status, 'info')
+            else:
+                other = 'raw' if selected == 'filtered' else 'filtered'
+                other_frame = self.frames.get(other)
+                if other_frame is not None and now - other_frame[1] <= 1.0:
+                    self.status.setText(
+                        f'Ping360 activo, pero no llega la fuente '
+                        f'{self.source.currentText().lower()}; la otra fuente sí llega'
+                    )
+                else:
+                    self.status.setText(
+                        f'Ping360 habilitado, sin mensajes de la fuente '
+                        f'{self.source.currentText().lower()}'
+                    )
+                set_widget_state(self.status, 'warning')
         else:
             points, received_at = frame
             age = now - received_at
@@ -180,8 +222,10 @@ class SonarView(QWidget):
                     f'Ping360 activo · {len(points)} puntos dibujables · '
                     f'último mensaje hace {age:.1f} s'
                 )
+                set_widget_state(self.status, 'success')
             else:
                 self.status.setText(
                     f'Ping360 sin datos recientes · última recepción hace {age:.1f} s'
                 )
+                set_widget_state(self.status, 'danger')
         self.canvas.update()

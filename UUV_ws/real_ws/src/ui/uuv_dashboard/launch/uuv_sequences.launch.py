@@ -12,7 +12,15 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
     output = ParameterValue(LaunchConfiguration('enable_sequence_output'), value_type=bool)
+    parameter_write = ParameterValue(
+        LaunchConfiguration('enable_parameter_write'), value_type=bool
+    )
+    accessory_output = ParameterValue(
+        LaunchConfiguration('accessory_control'), value_type=bool
+    )
     command_scale = ParameterValue(LaunchConfiguration('command_scale'), value_type=float)
+    camera_enabled = ParameterValue(LaunchConfiguration('camera'), value_type=bool)
+    sonar_enabled = ParameterValue(LaunchConfiguration('sonar'), value_type=bool)
     bridge = Node(
         package='uuv_mavlink',
         executable='mavlink_bridge_node',
@@ -26,9 +34,10 @@ def generate_launch_description():
                 'enable_arm_disarm': output,
                 'enable_mode_control': False,
                 'require_manual_mode': True,
-                'enable_accessory_output': False,
+                'enable_accessory_output': accessory_output,
+                'enable_parameter_write': parameter_write,
                 'command_scale': command_scale,
-                'sys_status_rate_hz': 0.0,
+                'sys_status_rate_hz': 5.0,
             }
         ],
     )
@@ -48,7 +57,33 @@ def generate_launch_description():
             }
         ],
     )
-    dashboard = Node(package='uuv_dashboard', executable='sequence_dashboard_node', output='both')
+    dashboard = Node(
+        package='uuv_dashboard',
+        executable='sequence_dashboard_node',
+        output='both',
+        parameters=[
+            {
+                'camera_expected': camera_enabled,
+                'sonar_expected': sonar_enabled,
+                'accessory_control_expected': accessory_output,
+                'sonar_acquisition_range_m': ParameterValue(
+                    LaunchConfiguration('sonar_range'), value_type=float
+                ),
+                'sonar_filter_radius_m': ParameterValue(
+                    LaunchConfiguration('sonar_filter_radius'), value_type=float
+                ),
+                'sonar_acquisition_threshold': ParameterValue(
+                    LaunchConfiguration('sonar_threshold'), value_type=float
+                ),
+                'sonar_filter_threshold': ParameterValue(
+                    LaunchConfiguration('sonar_filter_min_intensity'), value_type=float
+                ),
+                'sonar_angle_step': ParameterValue(
+                    LaunchConfiguration('sonar_angle_step'), value_type=int
+                ),
+            }
+        ],
+    )
     sonar = Node(
         package='ping360_ros2',
         executable='ping360_pointcloud_node',
@@ -93,6 +128,16 @@ def generate_launch_description():
             'enable_sequence_output',
             default_value='false',
             description='Explicitly enable physical GUIDED, Xbox arm and manual fallback',
+        ),
+        DeclareLaunchArgument(
+            'enable_parameter_write',
+            default_value='false',
+            description='Allow guarded persistent writes of the five exposed parameters',
+        ),
+        DeclareLaunchArgument(
+            'accessory_control',
+            default_value='false',
+            description='Enable camera tilt and light commands; propulsion remains separate',
         ),
         DeclareLaunchArgument('camera', default_value='true'),
         DeclareLaunchArgument(

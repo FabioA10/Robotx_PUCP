@@ -1,3 +1,5 @@
+from collections import deque
+import json
 import time
 
 from geometry_msgs.msg import PointStamped, Twist, Vector3Stamped
@@ -6,7 +8,15 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Empty, Float32, Int8, String, UInt32, UInt8MultiArray
 
+from .accessory_model import (
+    accessory_blocker,
+    button_mask,
+    level_to_percent,
+    normalize_light_step,
+    percent_to_level,
+)
 from .guided_bridge import GuidedBridge
+from .parameter_manager import AutopilotParameterManager
 from .telemetry_tap import TelemetryTap
 
 
@@ -137,7 +147,7 @@ class MavlinkBridgeNode(Node):
         self.declare_parameter('accessory_min_pwm', 1100)
         self.declare_parameter('accessory_neutral_pwm', 1500)
         self.declare_parameter('accessory_max_pwm', 1900)
-        self.declare_parameter('lights_steps', 9)
+        self.declare_parameter('lights_steps', 10)
         self.declare_parameter('lights_dimmer_button', 13)
         self.declare_parameter('lights_brighter_button', 14)
 
@@ -264,8 +274,17 @@ class MavlinkBridgeNode(Node):
         self.last_motor_power_state = None
         self.last_motion_allowed = None
 
+        # ArduSub does not report the physical light level.  Keep an explicit
+        # estimate and mark it unknown until the operator requests a hard
+        # zero/reference from the interface.
         self.lights_level = 0
-        self.pending_manual_buttons = 0
+        self.lights_synchronized = False
+        self.pending_light_steps = deque(maxlen=64)
+        self.light_button_release_pending = False
+        self.lights_sync_pending = False
+        self.last_accessory_input_time = None
+        self.last_accessory_action = 'Sin órdenes recibidas'
+        self.last_camera_command = 0.0
 
         self.last_camera_command_time = None
         self.camera_timeout_timer = self.create_timer(
@@ -306,6 +325,18 @@ class MavlinkBridgeNode(Node):
             10
         )
 
+        self.statustext_pub = self.create_publisher(
+            String,
+            '/uuv/alerts/statustext',
+            10
+        )
+
+        self.command_scale_pub = self.create_publisher(
+            Float32,
+            '/uuv/control/command_scale',
+            10
+        )
+
         self.motors_enabled_pub = self.create_publisher(
             Bool,
             '/uuv/power/motors_enabled',
@@ -327,6 +358,18 @@ class MavlinkBridgeNode(Node):
         self.lights_percent_pub = self.create_publisher(
             Float32,
             '/uuv/accessories/lights_percent',
+            10
+        )
+
+        self.accessory_output_pub = self.create_publisher(
+            Bool,
+            '/uuv/accessories/output_enabled',
+            10
+        )
+
+        self.accessory_status_pub = self.create_publisher(
+            String,
+            '/uuv/accessories/status',
             10
         )
 
@@ -408,6 +451,20 @@ class MavlinkBridgeNode(Node):
             10
         )
 
+        self.create_subscription(
+            Float32,
+            '/uuv/control/lights_percent_setpoint',
+            self.lights_setpoint_callback,
+            10
+        )
+
+        self.create_subscription(
+            Empty,
+            '/uuv/control/lights_off',
+            self.lights_off_callback,
+            10
+        )
+
         # =========================================================
         # MAVLink
         # =========================================================
@@ -428,6 +485,7 @@ class MavlinkBridgeNode(Node):
         self.telemetry_tap = TelemetryTap(self)
         self.telemetry_tap.attach(self.master.mav)
         self.guided = GuidedBridge(self)
+        self.parameter_manager = AutopilotParameterManager(self)
 
         # =========================================================
         # Timers
@@ -812,11 +870,18 @@ class MavlinkBridgeNode(Node):
 
     def camera_tilt_callback(self, msg):
 
+        command = self.clamp(float(msg.data), -1.0, 1.0)
+        if abs(command) > 1e-6:
+            self.last_accessory_input_time = time.monotonic()
+            self.last_accessory_action = (
+                'Cámara arriba' if command > 0.0 else 'Cámara abajo'
+            )
+
         if not self.accessory_command_is_allowed():
             return
 
         self.last_camera_command_time = time.monotonic()
-        command = self.clamp(float(msg.data), -1.0, 1.0)
+        self.last_camera_command = command
 
         if command >= 0.0:
             pwm = int(
@@ -853,58 +918,111 @@ class MavlinkBridgeNode(Node):
             )
 
         self.last_camera_command_time = None
+        self.last_camera_command = 0.0
 
     def lights_step_callback(self, msg):
 
+        try:
+            step = normalize_light_step(int(msg.data))
+        except ValueError:
+            return
+        self.last_accessory_input_time = time.monotonic()
+        self.last_accessory_action = (
+            'Aumentar luces' if step > 0 else 'Reducir luces'
+        )
         if not self.accessory_command_is_allowed():
             return
 
-        step = int(msg.data)
-        if step not in (-1, 1):
-            return
+        if len(self.pending_light_steps) < self.pending_light_steps.maxlen:
+            self.pending_light_steps.append(step)
 
-        new_level = max(
+    def lights_setpoint_callback(self, msg):
+        """Establish zero first, then reach a reproducible requested percentage."""
+        self.last_accessory_input_time = time.monotonic()
+        try:
+            target = percent_to_level(float(msg.data), self.lights_steps)
+        except ValueError:
+            self.last_accessory_action = 'Intensidad de luces inválida'
+            return
+        self.last_accessory_action = f'Fijar luces en {msg.data:.0f}%'
+        if not self.accessory_command_is_allowed():
+            return
+        self.pending_light_steps.clear()
+        self.pending_light_steps.extend([-1] * self.lights_steps)
+        self.pending_light_steps.extend([1] * target)
+        self.lights_sync_pending = True
+        self.lights_synchronized = False
+
+    def lights_off_callback(self, _msg):
+        """Queue enough dimmer edges to force the ArduSub light function to zero."""
+        message = Float32()
+        message.data = 0.0
+        self.lights_setpoint_callback(message)
+
+    def next_lights_frame(self):
+        """Return one press/release frame without collapsing rapid button requests."""
+        if self.light_button_release_pending:
+            self.light_button_release_pending = False
+            if not self.pending_light_steps and self.lights_sync_pending:
+                self.lights_sync_pending = False
+                self.lights_synchronized = True
+            return 0, True
+        if not self.pending_light_steps:
+            return 0, False
+        step = self.pending_light_steps.popleft()
+        button = self.lights_brighter_button if step > 0 else self.lights_dimmer_button
+        try:
+            mask = button_mask(button)
+        except ValueError as exc:
+            self.get_logger().error(str(exc))
+            self.pending_light_steps.clear()
+            return 0, False
+        self.lights_level = max(
             0,
-            min(
-                self.lights_steps,
-                self.lights_level + step
-            )
+            min(self.lights_steps, self.lights_level + step)
         )
+        self.light_button_release_pending = True
+        return mask, True
 
-        if new_level == self.lights_level:
-            return
+    def publish_accessory_status(self):
+        """Publish the gate, received input and estimated accessory state."""
+        enabled = Bool()
+        enabled.data = self.enable_accessory_output
+        self.accessory_output_pub.publish(enabled)
 
-        self.lights_level = new_level
+        percent = level_to_percent(self.lights_level, self.lights_steps)
+        light_message = Float32()
+        light_message.data = float(percent)
+        self.lights_percent_pub.publish(light_message)
 
-        if step > 0:
-            button = self.lights_brighter_button
-        else:
-            button = self.lights_dimmer_button
-
-        self.pending_manual_buttons |= (1 << button)
-
-        lights_percent = (
-            100.0 * self.lights_level / self.lights_steps
+        age = (
+            None
+            if self.last_accessory_input_time is None
+            else max(0.0, time.monotonic() - self.last_accessory_input_time)
         )
-
-        state_msg = Float32()
-        state_msg.data = float(lights_percent)
-        self.lights_percent_pub.publish(state_msg)
-
-        self.get_logger().info(
-            f'Lights request: {lights_percent:.1f}% '
-            f'(level {self.lights_level}/{self.lights_steps})'
+        status = String()
+        status.data = json.dumps(
+            {
+                'enabled': self.enable_accessory_output,
+                'connected': self.connected,
+                'ready': self.accessory_command_is_allowed(),
+                'blocker': accessory_blocker(
+                    self.enable_accessory_output,
+                    self.connected,
+                ),
+                'last_action': self.last_accessory_action,
+                'last_input_age_s': age,
+                'camera_command': self.last_camera_command,
+                'lights_percent_estimate': percent,
+                'lights_synchronized': self.lights_synchronized,
+                'pending_light_edges': len(self.pending_light_steps),
+            },
+            allow_nan=False,
         )
+        self.accessory_status_pub.publish(status)
 
     def accessory_command_is_allowed(self):
-
-        if not self.enable_accessory_output:
-            return False
-
-        if not self.connected:
-            return False
-
-        return True
+        return not accessory_blocker(self.enable_accessory_output, self.connected)
 
     def send_rc_override(self, channel, pwm):
 
@@ -981,6 +1099,7 @@ class MavlinkBridgeNode(Node):
             ):
                 continue
 
+            self.parameter_manager.observe(msg)
             msg_type = msg.get_type()
 
             if msg_type == 'HEARTBEAT':
@@ -1019,6 +1138,17 @@ class MavlinkBridgeNode(Node):
                 text = msg.text
                 if isinstance(text, bytes):
                     text = text.decode('utf-8', errors='replace')
+
+                alert = String()
+                alert.data = json.dumps(
+                    {
+                        'severity': int(msg.severity),
+                        'text': str(text).rstrip('\x00').strip(),
+                    },
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                self.statustext_pub.publish(alert)
 
                 self.get_logger().warning(
                     f'ArduSub [{msg.severity}]: {text}'
@@ -1306,6 +1436,11 @@ class MavlinkBridgeNode(Node):
 
         self.connected_pub.publish(msg)
 
+        scale_msg = Float32()
+        scale_msg.data = float(self.command_scale)
+        self.command_scale_pub.publish(scale_msg)
+        self.publish_accessory_status()
+
         if connected != self.last_connected_state:
 
             if connected:
@@ -1508,11 +1643,16 @@ class MavlinkBridgeNode(Node):
 
             return
 
-        # GUIDED uses the dedicated watchdog and sends only neutral pilot input.
-        if self.guided.monitor and self.mode == 'GUIDED':
-            return
+        buttons, accessory_frame_required = self.next_lights_frame()
 
-        if self.enable_command_output and allowed:
+        # In GUIDED, accessory button edges may still travel, but every pilot
+        # axis is forced neutral so the light control cannot become propulsion.
+        if self.guided.monitor and self.mode == 'GUIDED':
+            if not accessory_frame_required:
+                return
+            x, y, z, r = 0, 0, 500, 0
+
+        elif self.enable_command_output and allowed:
 
             x, y, z, r = (
                 self.convert_to_manual_control(
@@ -1528,8 +1668,6 @@ class MavlinkBridgeNode(Node):
             z = 500
             r = 0
 
-        buttons = self.pending_manual_buttons
-
         self.master.mav.manual_control_send(
             self.target_system_id,
             x,
@@ -1539,9 +1677,7 @@ class MavlinkBridgeNode(Node):
             buttons
         )
 
-        # A single transmitted frame creates the button rising edge.
-        # The next 20 Hz frame contains zero and releases the button.
-        self.pending_manual_buttons = 0
+        # next_lights_frame() always inserts a zero frame between press edges.
 
     # =============================================================
     # Shutdown safety
@@ -1602,7 +1738,7 @@ class MavlinkBridgeNode(Node):
                 # ArduSub controls Lights1 through configured joystick
                 # functions. BTN13 is dimmer on this vehicle. Repeated
                 # press/release edges guarantee a zero-light shutdown.
-                dimmer_mask = 1 << self.lights_dimmer_button
+                dimmer_mask = button_mask(self.lights_dimmer_button)
 
                 for _ in range(self.lights_steps):
                     self.master.mav.manual_control_send(

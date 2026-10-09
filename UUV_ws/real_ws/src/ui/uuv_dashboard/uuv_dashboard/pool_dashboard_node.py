@@ -1,9 +1,11 @@
 """Pool telemetry, preflight and supervised-manual profile display."""
 
+from collections import deque
 import json
 import math
 import signal
 import sys
+import time
 
 from geometry_msgs.msg import PointStamped, Vector3Stamped
 from python_qt_binding.QtCore import Qt, QTimer
@@ -50,6 +52,30 @@ class PoolDashboard(QWidget):
         self.enable_mode_requests = bool(
             node.declare_parameter('enable_mode_requests', False).value
         )
+        self.camera_expected = bool(
+            node.declare_parameter('camera_expected', True).value
+        )
+        self.sonar_expected = bool(
+            node.declare_parameter('sonar_expected', False).value
+        )
+        self.sonar_acquisition_range_m = float(
+            node.declare_parameter('sonar_acquisition_range_m', 5.0).value
+        )
+        self.sonar_filter_radius_m = float(
+            node.declare_parameter('sonar_filter_radius_m', 2.0).value
+        )
+        self.sonar_acquisition_threshold = float(
+            node.declare_parameter('sonar_acquisition_threshold', 1.0).value
+        )
+        self.sonar_filter_threshold = float(
+            node.declare_parameter('sonar_filter_threshold', 90.0).value
+        )
+        self.sonar_angle_step = int(
+            node.declare_parameter('sonar_angle_step', 4).value
+        )
+        self.accessory_control_expected = bool(
+            node.declare_parameter('accessory_control_expected', False).value
+        )
         self.data = Telemetry()
         self.subscriptions = []
         self.labels = {}
@@ -62,6 +88,13 @@ class PoolDashboard(QWidget):
         self.live_preview = False
         self.pending_mode = None
         self.mode_requested_at = 0.0
+        self.current_samples = deque()
+        self.voltage_samples = deque()
+        self.camera_frame_times = deque()
+        self.alerts = deque(maxlen=20)
+        self.current_limit_a = None
+        self.accessory_status_data = {}
+        self.xbox_status_data = {}
         title_suffix = 'perfil manual supervisado' if self.operator_profile else 'solo lectura'
         self.setWindowTitle(f'RobotX | Preparación de piscina — {title_suffix}')
         self.setObjectName('RobotXRoot')
@@ -104,6 +137,13 @@ class PoolDashboard(QWidget):
             ('armed', 'Armado', Bool, '/uuv/armed'),
             ('mode', 'Modo real', String, '/uuv/mode'),
             ('voltage', 'Batería [V]', Float32, '/uuv/power/voltage'),
+            ('current', 'Corriente total [A]', Float32, '/uuv/power/current'),
+            (
+                'command_scale',
+                'Límite Xbox/MANUAL',
+                Float32,
+                '/uuv/control/command_scale',
+            ),
             ('depth', 'Profundidad estimada [m]*', Float32, '/uuv/telemetry/depth_estimate_m'),
             ('heading', 'Rumbo [°]', Float32, '/uuv/telemetry/heading_deg'),
             ('pressure', 'Presión absoluta [hPa]', Float32, '/uuv/telemetry/pressure_abs_hpa'),
@@ -113,6 +153,18 @@ class PoolDashboard(QWidget):
                 'Salida de órdenes ROS habilitada',
                 Bool,
                 '/uuv/control/command_output_enabled',
+            ),
+            (
+                'accessory_output',
+                'Salida de cámara/luces habilitada',
+                Bool,
+                '/uuv/accessories/output_enabled',
+            ),
+            (
+                'lights_percent',
+                'Luces estimadas [%]',
+                Float32,
+                '/uuv/accessories/lights_percent',
             ),
             ('deadman', 'RB del mando', Bool, '/uuv/deadman'),
             (
@@ -129,7 +181,8 @@ class PoolDashboard(QWidget):
             ('attitude', 'Roll/Pitch/Yaw [°]'),
         ]
         vehicle_keys = {
-            'connected', 'armed', 'mode', 'voltage', 'output', 'deadman', 'motion_allowed'
+            'connected', 'armed', 'mode', 'voltage', 'current', 'command_scale',
+            'output', 'accessory_output', 'lights_percent', 'deadman', 'motion_allowed'
         }
         rows = {'vehicle': 0, 'navigation': 0}
         for key, label in fields:
@@ -147,9 +200,25 @@ class PoolDashboard(QWidget):
         for key, _, msg_type, topic in scalar_fields:
             self.subscriptions.append(
                 node.create_subscription(
-                    msg_type, topic, lambda msg, k=key: self.data.put(k, msg.data), qos
+                    msg_type, topic, lambda msg, k=key: self.scalar(k, msg.data), qos
                 )
             )
+        self.subscriptions.append(
+            node.create_subscription(
+                String,
+                '/uuv/accessories/status',
+                self.receive_accessory_status,
+                10,
+            )
+        )
+        self.subscriptions.append(
+            node.create_subscription(
+                String,
+                '/uuv/input/xbox_status',
+                self.receive_xbox_status,
+                10,
+            )
+        )
         for key, msg_type, topic, attr in [
             ('position', PointStamped, 'local_position_ned', 'point'),
             ('velocity', Vector3Stamped, 'local_velocity_ned', 'vector'),
@@ -175,6 +244,31 @@ class PoolDashboard(QWidget):
         self.ekf_text.setWordWrap(True)
         self.ekf_text.setObjectName('TelemetryValue')
         tl.addWidget(self.ekf_text)
+        self.power_summary = QLabel('Energía: esperando tensión y corriente válidas')
+        self.power_summary.setObjectName('TelemetryValue')
+        self.power_summary.setWordWrap(True)
+        set_widget_state(self.power_summary, 'neutral')
+        tl.addWidget(self.power_summary)
+        self.alert_summary = QLabel('ArduSub: sin mensajes STATUSTEXT recibidos')
+        self.alert_summary.setObjectName('TelemetryValue')
+        self.alert_summary.setWordWrap(True)
+        set_widget_state(self.alert_summary, 'neutral')
+        tl.addWidget(self.alert_summary)
+        self.alert_history = QTextEdit()
+        self.alert_history.setReadOnly(True)
+        self.alert_history.setMaximumHeight(110)
+        self.alert_history.setPlaceholderText(
+            'Aquí aparecerán avisos de batería, pre-armado y failsafe.'
+        )
+        tl.addWidget(self.alert_history)
+        self.subscriptions.append(
+            node.create_subscription(
+                String,
+                '/uuv/alerts/statustext',
+                self.receive_statustext,
+                10,
+            )
+        )
         reference_button = QPushButton('Tomar referencia para medir variación XY')
         reference_button.setObjectName('PrimaryAction')
         reference_button.clicked.connect(self.capture_reference)
@@ -187,17 +281,32 @@ class PoolDashboard(QWidget):
         tabs.addTab(self.make_preflight(), 'Preflight · piscina')
         if self.operator_profile:
             tabs.addTab(self.make_operator_controls(), 'Mando · modos')
+        camera_page = QWidget()
+        camera_layout = QVBoxLayout(camera_page)
+        self.camera_status = QLabel('Cámara: esperando estado')
+        self.camera_status.setObjectName('TelemetryValue')
+        self.camera_status.setWordWrap(True)
+        set_widget_state(self.camera_status, 'neutral')
+        camera_layout.addWidget(self.camera_status)
         self.video = QLabel(
             'CÁMARA SIN DATOS\n\nEsperando /camera/image/compressed'
         )
         self.video.setObjectName('VideoSurface')
         self.video.setAlignment(Qt.AlignCenter)
         self.video.setMinimumSize(320, 180)
-        tabs.addTab(self.video, 'Cámara')
+        camera_layout.addWidget(self.video, 1)
+        tabs.addTab(camera_page, 'Cámara')
         self.subscriptions.append(
             node.create_subscription(CompressedImage, '/camera/image/compressed', self.image, qos)
         )
-        self.sonar = SonarView()
+        self.sonar = SonarView(
+            expected=self.sonar_expected,
+            acquisition_range_m=self.sonar_acquisition_range_m,
+            filter_radius_m=self.sonar_filter_radius_m,
+            acquisition_threshold=self.sonar_acquisition_threshold,
+            filter_threshold=self.sonar_filter_threshold,
+            angle_step=self.sonar_angle_step,
+        )
         tabs.addTab(self.sonar, 'Ping360')
         self.subscriptions.append(
             node.create_subscription(
@@ -229,9 +338,68 @@ class PoolDashboard(QWidget):
     def vector(self, key, value):
         self.data.put(key, (value.x, value.y, value.z))
 
+    def scalar(self, key, value):
+        """Store a scalar and retain short power histories for operator peaks."""
+        self.data.put(key, value)
+        now = self.data.clock()
+        if key == 'current' and math.isfinite(float(value)):
+            self.current_samples.append((now, float(value)))
+        elif key == 'voltage' and math.isfinite(float(value)):
+            self.voltage_samples.append((now, float(value)))
+        for samples in (self.current_samples, self.voltage_samples):
+            while samples and now - samples[0][0] > 60.0:
+                samples.popleft()
+
+    def receive_statustext(self, message):
+        """Keep recent autopilot warnings visible instead of only in a terminal."""
+        try:
+            payload = json.loads(message.data)
+            severity = int(payload['severity'])
+            text = str(payload['text']).strip()
+            if not 0 <= severity <= 7 or not text:
+                return
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return
+        now = time.monotonic()
+        if self.alerts and self.alerts[-1][:2] == (severity, text):
+            if now - self.alerts[-1][2] < 1.0:
+                return
+        self.alerts.append((severity, text, now))
+        self.data.put('alert', (severity, text))
+        self.alert_history.setPlainText(
+            '\n'.join(
+                f'[{item_severity}] {item_text}'
+                for item_severity, item_text, _stamp in reversed(self.alerts)
+            )
+        )
+
+    def receive_accessory_status(self, message):
+        """Keep the bridge gate visible in the supervised-manual page."""
+        try:
+            payload = json.loads(message.data)
+            if isinstance(payload, dict):
+                self.accessory_status_data = payload
+                self.data.put('accessory_status', True)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+
+    def receive_xbox_status(self, message):
+        """Keep the last normalized Xbox gesture diagnosis."""
+        try:
+            payload = json.loads(message.data)
+            if isinstance(payload, dict):
+                self.xbox_status_data = payload
+                self.data.put('xbox_status', True)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+
     def image(self, msg):
         self.pending_image = bytes(msg.data)
         self.data.put('video', True)
+        now = time.monotonic()
+        self.camera_frame_times.append(now)
+        while self.camera_frame_times and now - self.camera_frame_times[0] > 2.0:
+            self.camera_frame_times.popleft()
 
     def make_planner(self):
         page = QWidget()
@@ -378,6 +546,18 @@ class PoolDashboard(QWidget):
         )
         note.setWordWrap(True)
         layout.addWidget(note)
+        accessory_map = QLabel(
+            'D-pad ↑/↓ mueve cámara · D-pad ←/→ cambia luces ±10 %. '
+            'Para accesorios, LB y RB deben estar sueltos y los ejes en neutro.'
+        )
+        accessory_map.setObjectName('MutedText')
+        accessory_map.setWordWrap(True)
+        layout.addWidget(accessory_map)
+        self.operator_accessory_status = QLabel('Accesorios: esperando diagnóstico')
+        self.operator_accessory_status.setObjectName('TelemetryValue')
+        self.operator_accessory_status.setWordWrap(True)
+        set_widget_state(self.operator_accessory_status, 'neutral')
+        layout.addWidget(self.operator_accessory_status)
         self.mode_request_pub = self.node.create_publisher(String, '/uuv/control/mode_request', 10)
         row = QHBoxLayout()
         self.mode_selector = QComboBox()
@@ -431,6 +611,7 @@ class PoolDashboard(QWidget):
     def update_mode_request(self):
         if not self.operator_profile:
             return
+        self.update_operator_accessories()
         ready = self.mode_request_ready()
         self.mode_apply.setEnabled(ready)
         self.mode_selector.setEnabled(ready)
@@ -458,6 +639,36 @@ class PoolDashboard(QWidget):
                 'Sin confirmación en 5 s. Revisa el modo real y la terminal.'
             )
             self.pending_mode = None
+
+    def update_operator_accessories(self):
+        """Explain both launch-level and gesture-level accessory blockers."""
+        if not self.operator_profile:
+            return
+        bridge_fresh = self.data.get('accessory_status') is True
+        xbox_fresh = self.data.get('xbox_status') is True
+        bridge = self.accessory_status_data if bridge_fresh else {}
+        xbox = self.xbox_status_data if xbox_fresh else {}
+        if not bridge_fresh:
+            text, state = 'Accesorios: puente sin diagnóstico reciente', 'warning'
+        elif not bridge.get('enabled'):
+            text = 'Accesorios bloqueados: inicia con accessory_control:=true'
+            state = 'info'
+        elif not bridge.get('connected'):
+            text = 'Accesorios habilitados, pero el autopiloto no tiene enlace'
+            state = 'warning'
+        elif not xbox_fresh:
+            text = 'Puente de accesorios listo; mando sin mensajes recientes'
+            state = 'warning'
+        elif not xbox.get('accessory_allowed'):
+            text = 'Gesto de accesorios bloqueado: ' + (
+                xbox.get('blocker') or 'entrada no válida'
+            )
+            state = 'warning'
+        else:
+            text = 'Cámara/luces listas · D-pad disponible'
+            state = 'success'
+        self.operator_accessory_status.setText(text)
+        set_widget_state(self.operator_accessory_status, state)
 
     def update_preflight(self, *_):
         if not hasattr(self, 'preflight_checks'):
@@ -617,6 +828,93 @@ class PoolDashboard(QWidget):
             self.reference = None
             self.drift.setText('No hay posición reciente para tomar referencia')
 
+    def recent_values(self, samples, horizon_s):
+        """Return finite values received inside a short local-arrival window."""
+        now = self.data.clock()
+        return [value for stamp, value in samples if 0.0 <= now - stamp <= horizon_s]
+
+    def update_power_summary(self):
+        """Present current peaks and voltage sag without claiming hardware protection."""
+        current = self.data.get('current')
+        voltage = self.data.get('voltage')
+        current_1s = self.recent_values(self.current_samples, 1.0)
+        current_60s = self.recent_values(self.current_samples, 60.0)
+        voltage_1s = self.recent_values(self.voltage_samples, 1.0)
+        if current is None and voltage is None:
+            self.power_summary.setText('Energía: sin tensión/corriente reciente')
+            set_widget_state(self.power_summary, 'neutral')
+            return
+        parts = []
+        if current is not None:
+            parts.append(f'corriente {current:.2f} A')
+        if current_1s:
+            parts.append(f'pico 1 s {max(current_1s):.2f} A')
+        if current_60s:
+            parts.append(f'pico 60 s {max(current_60s):.2f} A')
+        if voltage is not None:
+            parts.append(f'tensión {voltage:.2f} V')
+        if voltage_1s:
+            parts.append(f'mínimo 1 s {min(voltage_1s):.2f} V')
+        if self.current_limit_a is not None:
+            parts.append(f'MOT_BAT_CURR_MAX {self.current_limit_a:g} A')
+        self.power_summary.setText('Energía · ' + ' · '.join(parts))
+        peak = max(current_1s) if current_1s else current
+        if peak is not None and self.current_limit_a is not None:
+            if peak >= self.current_limit_a:
+                state = 'danger'
+            elif peak >= 0.80 * self.current_limit_a:
+                state = 'warning'
+            else:
+                state = 'success'
+        else:
+            state = 'info'
+        set_widget_state(self.power_summary, state)
+
+    def update_alert_summary(self):
+        """Render the newest ArduSub message with MAVLink severity."""
+        if not self.alerts:
+            self.alert_summary.setText('ArduSub: sin mensajes STATUSTEXT recibidos')
+            set_widget_state(self.alert_summary, 'neutral')
+            return
+        severity, text, stamp = self.alerts[-1]
+        age = max(0.0, time.monotonic() - stamp)
+        self.alert_summary.setText(
+            f'ArduSub [{severity}] · {text} · recibido hace {age:.1f} s'
+        )
+        state = 'danger' if severity <= 3 else 'warning' if severity == 4 else 'info'
+        set_widget_state(self.alert_summary, state)
+
+    def update_camera_status(self):
+        """Distinguish launch-disabled, missing and stale video states."""
+        now = time.monotonic()
+        while self.camera_frame_times and now - self.camera_frame_times[0] > 2.0:
+            self.camera_frame_times.popleft()
+        video_fresh = self.data.get('video') is True
+        age = self.data.age('video')
+        if video_fresh:
+            fps = 0.0
+            if len(self.camera_frame_times) >= 2:
+                span = self.camera_frame_times[-1] - self.camera_frame_times[0]
+                if span > 0:
+                    fps = (len(self.camera_frame_times) - 1) / span
+            self.camera_status.setText(
+                f'Cámara activa · {fps:.1f} FPS recibidos · último frame hace {age:.1f} s'
+            )
+            set_widget_state(self.camera_status, 'success')
+        elif not self.camera_expected:
+            self.camera_status.setText('Cámara deshabilitada por camera:=false')
+            set_widget_state(self.camera_status, 'info')
+        elif age is None:
+            self.camera_status.setText(
+                'Cámara habilitada, pero todavía no llegaron imágenes'
+            )
+            set_widget_state(self.camera_status, 'warning')
+        else:
+            self.camera_status.setText(
+                f'Imagen detenida · último frame recibido hace {age:.1f} s'
+            )
+            set_widget_state(self.camera_status, 'danger')
+
     def tick(self):
         if not rclpy.ok():
             self.close()
@@ -628,7 +926,9 @@ class PoolDashboard(QWidget):
         for key, label in self.labels.items():
             value = self.data.get(key)
             age = self.data.age(key)
-            if value is None or (not connected and key not in ('connected', 'output')):
+            if value is None or (
+                not connected and key not in ('connected', 'output', 'accessory_output')
+            ):
                 label.setText(
                     'Sin datos recientes'
                     if age is None
@@ -640,6 +940,14 @@ class PoolDashboard(QWidget):
                     text = ' / '.join(f'{v:.3f}' for v in values)
                 elif isinstance(value, bool):
                     text = 'Sí' if value else 'No'
+                elif key == 'current':
+                    recent = self.recent_values(self.current_samples, 1.0)
+                    peak = max(recent) if recent else float(value)
+                    text = f'{float(value):.2f} A · pico 1 s {peak:.2f} A'
+                elif key == 'command_scale':
+                    text = f'{100.0 * float(value):.1f} %'
+                elif key == 'lights_percent':
+                    text = f'{float(value):.1f} % (estimado)'
                 elif isinstance(value, float):
                     text = f'{value:.3f}'
                 else:
@@ -666,17 +974,33 @@ class PoolDashboard(QWidget):
                     else ('success' if connected and value is False else 'neutral')
                 )
                 set_widget_state(label, state)
-            elif key in ('output', 'motion_allowed'):
+            elif key in ('output', 'accessory_output', 'motion_allowed'):
                 state = (
                     'warning'
                     if connected and value is True
                     else ('success' if connected and value is False else 'neutral')
                 )
                 set_widget_state(label, state)
+            elif key == 'current':
+                peak_values = self.recent_values(self.current_samples, 1.0)
+                peak = max(peak_values) if peak_values else value
+                if peak is None or self.current_limit_a is None:
+                    state = 'neutral'
+                elif peak >= self.current_limit_a:
+                    state = 'danger'
+                elif peak >= 0.80 * self.current_limit_a:
+                    state = 'warning'
+                else:
+                    state = 'success'
+                set_widget_state(label, state)
         flags = self.data.get('ekf') if connected else None
         self.ekf_text.setText('EKF: ' + ekf_description(flags))
+        self.update_power_summary()
+        self.update_alert_summary()
         if not connected:
-            self.status.setText('Sin conexión reciente. Puedes preparar secuencias ficticias.')
+            self.status.setText(
+                'Puente ROS activo · autopiloto sin heartbeat reciente'
+            )
             set_widget_state(self.status, 'danger')
         elif self.data.get('armed') is not False or self.data.get('output') is not False:
             self.status.setText(
@@ -724,9 +1048,14 @@ class PoolDashboard(QWidget):
             )
         else:
             self.video.setText(
-                'CÁMARA SIN DATOS RECIENTES\n\n'
-                'Esperando /camera/image/compressed'
+                (
+                    'CÁMARA DESHABILITADA EN EL LANZAMIENTO'
+                    if not self.camera_expected
+                    else 'CÁMARA SIN DATOS RECIENTES\n\n'
+                    'Esperando /camera/image/compressed'
+                )
             )
+        self.update_camera_status()
         self.sonar.refresh()
         self.update_preflight()
 
