@@ -38,3 +38,6 @@ diagnostico_DVL_*.zip
 diagnostico_DVL_*.tar.*
 UUV_ws/real_ws/~/
 UUV_ws/real_ws/ping360_bags_inventario.txt
+/UUV_ws/real_ws/build*/
+/UUV_ws/real_ws/install*/
+/UUV_ws/real_ws/log*/
