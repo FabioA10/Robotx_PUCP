@@ -16,6 +16,8 @@ def status(**changes):
         'mode': 'MANUAL',
         'armed': False,
         'validated': False,
+        'home': None,
+        'home_ready': False,
         'navigation_ready': True,
         'enabled': True,
         'blockers': [],
@@ -55,11 +57,39 @@ class UiStateModelTests(unittest.TestCase):
         self.assertIn('DVL sin referencia', guide['reasons'])
         self.assertEqual(workflow_states(current, True, True, True)['guided'], 'blocked')
 
-    def test_guided_ready_requests_execution(self):
+    def test_guided_ready_requests_home(self):
         current = status(validated=True, armed=True, mode='GUIDED')
         guide = operator_guidance(current, True, True, True)
-        self.assertIn('iniciar', guide['message'])
+        self.assertIn('fijar Home', guide['message'])
+        states = workflow_states(current, True, True, True)
+        self.assertEqual(states['home'], 'active')
+        self.assertEqual(states['execute'], 'neutral')
+
+    def test_guided_settling_blocks_home_capture(self):
+        current = status(
+            validated=True,
+            armed=True,
+            mode='GUIDED',
+            blockers=['Estabilizando entrada a GUIDED'],
+        )
+        guide = operator_guidance(current, True, True, True)
+        self.assertIn('GUIDED estable', guide['message'])
+        self.assertEqual(workflow_states(current, True, True, True)['home'], 'blocked')
+
+    def test_home_ready_requests_execution(self):
+        current = status(
+            validated=True,
+            armed=True,
+            mode='GUIDED',
+            home={'n': 1.0, 'e': 2.0, 'depth': 0.2, 'yaw': 0.3},
+            home_ready=True,
+        )
+        guide = operator_guidance(current, True, True, True)
+        self.assertIn('6 · iniciar', guide['message'])
         self.assertEqual(guide['state'], 'success')
+        states = workflow_states(current, True, True, True)
+        self.assertEqual(states['home'], 'done')
+        self.assertEqual(states['execute'], 'active')
 
     def test_running_sequence_keeps_abort_available(self):
         current = status(
@@ -67,6 +97,8 @@ class UiStateModelTests(unittest.TestCase):
             validated=True,
             armed=True,
             mode='GUIDED',
+            home={'n': 0.0, 'e': 0.0, 'depth': 0.2, 'yaw': 0.0},
+            home_ready=True,
         )
         guide = operator_guidance(current, True, True, True)
         self.assertTrue(guide['abort_available'])

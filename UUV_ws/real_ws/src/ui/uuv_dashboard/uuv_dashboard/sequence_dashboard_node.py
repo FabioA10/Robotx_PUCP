@@ -192,7 +192,8 @@ class SequenceDashboard(PoolDashboard):
             ('prepare', '2  PREPARAR'),
             ('arm', '3  ARMAR'),
             ('guided', '4  GUIDED'),
-            ('execute', '5  EJECUTAR'),
+            ('home', '5  FIJAR HOME'),
+            ('execute', '6  EJECUTAR'),
         ):
             label = QLabel(text)
             label.setObjectName('StagePill')
@@ -791,7 +792,7 @@ class SequenceDashboard(PoolDashboard):
         operation_layout.addWidget(operation_title)
         instructions = QLabel(
             'Preparar no arma. El armado se confirma desde el mando y GUIDED '
-            'retiene la pose actual antes de habilitar el inicio.'
+            'retiene la pose actual. Con GUIDED estable, fija Home antes de ejecutar.'
         )
         instructions.setObjectName('MutedText')
         instructions.setWordWrap(True)
@@ -839,7 +840,9 @@ class SequenceDashboard(PoolDashboard):
         prepare_button.setObjectName('PrimaryAction')
         guided_button = self.button('4 · Solicitar GUIDED seguro', 'guided')
         guided_button.setObjectName('GuidedAction')
-        execute_button = self.button('5 · Iniciar plan preparado', 'execute')
+        home_button = self.button('5 · Fijar Home con la pose retenida por GUIDED', 'set_home')
+        home_button.setObjectName('PrimaryAction')
+        execute_button = self.button('6 · Iniciar plan preparado', 'execute')
         execute_button.setObjectName('SuccessAction')
         action_layout.addWidget(prepare_button)
         arm_note = QLabel('3 · ARMAR se confirma desde el mando; esta interfaz no arma.')
@@ -847,6 +850,7 @@ class SequenceDashboard(PoolDashboard):
         arm_note.setWordWrap(True)
         action_layout.addWidget(arm_note)
         action_layout.addWidget(guided_button)
+        action_layout.addWidget(home_button)
         action_layout.addWidget(execute_button)
         operation_layout.addWidget(actions)
 
@@ -1090,9 +1094,10 @@ class SequenceDashboard(PoolDashboard):
         layout.setSpacing(6)
 
         explanation = QLabel(
-            'El origen X=0, Y=0 y rumbo 0° se captura al preparar, con el ROV '
-            'desarmado y estable. La profundidad es absoluta respecto a la superficie '
-            'calibrada. Cada punto ejecuta: profundidad → X-Y → ángulo → verificación.'
+            'Con GUIDED estable, pulsa 5 · Fijar Home: la pose y el rumbo retenidos '
+            'al entrar en GUIDED serán X=0, Y=0 y ángulo 0°. La profundidad permanece '
+            'absoluta respecto a la superficie calibrada. Cada punto ejecuta: '
+            'profundidad → X-Y → ángulo → verificación.'
         )
         explanation.setObjectName('MutedText')
         explanation.setWordWrap(True)
@@ -2686,7 +2691,7 @@ class SequenceDashboard(PoolDashboard):
         self.update_health(s, True)
         self.update_guidance(s, True, matching)
         self.stop_button.setText('ABORTAR MOVIMIENTO → MANUAL · NO DESARMA')
-        for action in ('prepare', 'guided', 'execute'):
+        for action in ('prepare', 'guided', 'set_home', 'execute'):
             self.buttons[action].setEnabled(not running)
         self.buttons['prepare'].setEnabled(
             not running
@@ -2699,6 +2704,7 @@ class SequenceDashboard(PoolDashboard):
             matching
             and not running
             and s.get('validated', False)
+            and s.get('home_ready', bool(s.get('home')))
             and s.get('enabled', False)
             and s.get('armed') is True
             and s.get('mode') == 'GUIDED'
@@ -2713,6 +2719,18 @@ class SequenceDashboard(PoolDashboard):
             and s.get('navigation_ready') is True
             and not s.get('blockers')
             and s.get('mode') != 'GUIDED'
+        )
+        self.buttons['set_home'].setEnabled(
+            matching
+            and not running
+            and s.get('validated', False)
+            and not s.get('home_ready', bool(s.get('home')))
+            and s.get('armed') is True
+            and s.get('mode') == 'GUIDED'
+            and s.get('navigation_ready') is True
+            and not s.get('guided_entry_pending', False)
+            and not s.get('guided_settling', False)
+            and not s.get('blockers')
         )
         self.plan_editor.setEnabled(not running and s.get('armed') is False)
         self.step_list.setEnabled(not running and s.get('armed') is False)
@@ -2762,6 +2780,7 @@ class SequenceDashboard(PoolDashboard):
             'COMPLETADO': 'success',
             'LISTO': 'success',
             'LISTO_GUIDED': 'info',
+            'HOME_PENDIENTE': 'info',
             'PREPARADO': 'info',
             'IDLE': 'neutral',
         }

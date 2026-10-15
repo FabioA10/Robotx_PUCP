@@ -1,7 +1,7 @@
 """Pure presentation rules for the supervised sequence dashboard."""
 
 
-STAGES = ('configure', 'prepare', 'arm', 'guided', 'execute')
+STAGES = ('configure', 'prepare', 'arm', 'guided', 'home', 'execute')
 
 
 def controller_tuning_payload(
@@ -59,6 +59,15 @@ def workflow_states(status, fresh, has_steps, plan_matches):
         )
         return states
     states['guided'] = 'done'
+
+    if not status.get('home_ready', bool(status.get('home'))):
+        states['home'] = (
+            'active'
+            if status.get('navigation_ready') is True and not status.get('blockers')
+            else 'blocked'
+        )
+        return states
+    states['home'] = 'done'
 
     phase_code = (status.get('phase') or {}).get('code')
     if phase_code == 'COMPLETADO':
@@ -123,8 +132,15 @@ def operator_guidance(status, fresh, has_steps, plan_matches):
     if status.get('navigation_ready') is not True or blockers:
         if status.get('navigation_ready') is not True:
             blockers.insert(0, 'La navegación todavía no está lista.')
+        waiting_for_home = status.get('mode') == 'GUIDED' and not status.get(
+            'home_ready', bool(status.get('home'))
+        )
         return {
-            'message': 'GUIDED bloqueado · corrige las condiciones indicadas',
+            'message': (
+                'Esperando GUIDED estable para fijar Home'
+                if waiting_for_home
+                else 'GUIDED bloqueado · corrige las condiciones indicadas'
+            ),
             'state': 'warning',
             'reasons': blockers,
             'abort_available': True,
@@ -136,6 +152,15 @@ def operator_guidance(status, fresh, has_steps, plan_matches):
             'reasons': ['El plan está preparado, armado y con navegación válida.'],
             'abort_available': True,
         }
+    if not status.get('home_ready', bool(status.get('home'))):
+        return {
+            'message': 'Siguiente: 5 · fijar Home con la pose retenida por GUIDED',
+            'state': 'info',
+            'reasons': [
+                'X=0, Y=0 y rumbo 0° usarán la referencia capturada al entrar en GUIDED.'
+            ],
+            'abort_available': True,
+        }
     if status.get('enabled') is not True:
         return {
             'message': 'GUIDED listo · salida física deshabilitada',
@@ -144,7 +169,7 @@ def operator_guidance(status, fresh, has_steps, plan_matches):
             'abort_available': True,
         }
     return {
-        'message': 'Siguiente: 5 · iniciar el plan preparado',
+        'message': 'Siguiente: 6 · iniciar el plan preparado',
         'state': 'success',
         'reasons': ['Todas las condiciones de inicio están confirmadas.'],
         'abort_available': True,

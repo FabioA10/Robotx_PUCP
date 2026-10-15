@@ -1044,6 +1044,7 @@ class TestExecutor(unittest.TestCase):
             'armed': False,
             'enabled': False,
             'reason': 'test',
+            'hold_target': [0, 0, 0, 0],
         }
         for _ in range(45):
             self.advance()
@@ -1118,29 +1119,82 @@ class TestExecutor(unittest.TestCase):
     def test_prepare_transaction_does_not_arm_or_move(self):
         self.req('prepare', sensor_depth=0.15, max_depth=0.2, radius=0.5, steps=[['wait', 3]])
         self.assertIsNotNone(self.ex.reference, self.ex.note)
-        self.assertIsNotNone(self.ex.home)
+        self.assertIsNone(self.ex.home)
         self.assertIsNotNone(self.ex.validated)
+        self.assertEqual(self.ex.total, 1)
         self.assertEqual(self.ex.core.limits.max_depth, 0.2)
         self.assertEqual(self.ex.core.limits.horizontal_speed, 0.2)
         self.assertEqual(self.ex.prepared_by, ['ui', 0])
         self.assertEqual(self.ex.command_pub.messages, [])
         self.assertEqual(self.ex.action_pub.messages, [])
 
-    def test_prepare_and_execute_absolute_plan_keep_fixed_home_origin(self):
+    def test_set_home_in_guided_defines_absolute_mission_frame(self):
         point = TestSequenceCore.absolute_point(x=0.5, y=0.25, depth=0.3)
         self.req('prepare', plan_mode='absolute', steps=[point])
         self.assertIsNotNone(self.ex.validated, self.ex.note)
         self.assertEqual(self.ex.validated['plan_mode'], 'absolute')
         self.assertEqual(self.ex.plan_mode, 'absolute')
-        self.f['samples']['position'] = [0.08, -0.03, 0.0]
-        self.f.update(armed=True, mode='GUIDED', enabled=True, blockers=[])
+        self.assertIsNone(self.ex.home)
+        self.f['samples']['position'] = [1.05, -1.98, 0.0]
+        self.f['samples']['yaw'] = math.pi / 2 + 0.02
+        self.f.update(
+            armed=True,
+            mode='GUIDED',
+            enabled=True,
+            blockers=[],
+            hold_target=[1.0, -2.0, 0.0, math.pi / 2],
+        )
         self.advance()
+        self.req('set_home')
+        self.assertIsNotNone(self.ex.home, self.ex.note)
         self.ui()
         self.req('execute', plan_mode='absolute', steps=[point])
         self.assertEqual(self.ex.core.state, 'RUNNING', self.ex.note)
-        self.assertAlmostEqual(self.ex.core.goal.n, 0.5)
-        self.assertAlmostEqual(self.ex.core.goal.e, 0.25)
+        self.assertAlmostEqual(self.ex.home.n, 1.0)
+        self.assertAlmostEqual(self.ex.home.e, -2.0)
+        self.assertAlmostEqual(self.ex.home.yaw, math.pi / 2)
+        self.assertAlmostEqual(self.ex.core.goal.n, 0.75)
+        self.assertAlmostEqual(self.ex.core.goal.e, -1.5)
         self.assertEqual(self.ex.core.waypoint_phase, 'DEPTH')
+
+    def test_execute_requires_explicit_home_after_guided_is_stable(self):
+        self.req('prepare')
+        self.f.update(armed=True, mode='GUIDED', enabled=True, blockers=[])
+        self.advance()
+        self.ui()
+        self.req('execute')
+        self.assertNotEqual(self.ex.core.state, 'RUNNING')
+        self.assertIn('Fijar Home', self.ex.note)
+
+    def test_set_home_rejects_unstable_guided_without_discarding_plan(self):
+        self.req('prepare')
+        saved = self.ex.validated
+        self.f.update(
+            armed=True,
+            mode='GUIDED',
+            enabled=True,
+            blockers=['Estabilizando entrada a GUIDED'],
+            guided_settling=True,
+        )
+        self.advance()
+        phase = self.ex.phase_status(self.now, self.ex.pose(), '')
+        self.assertEqual(phase['title'], 'ESPERANDO GUIDED ESTABLE')
+        self.req('set_home')
+        self.assertIsNone(self.ex.home)
+        self.assertIs(self.ex.validated, saved)
+        self.assertIn('estabilizarse', self.ex.note)
+
+    def test_leaving_guided_invalidates_only_home(self):
+        self.req('prepare')
+        self.f.update(armed=True, mode='GUIDED', enabled=True, blockers=[])
+        self.advance()
+        self.req('set_home')
+        self.assertIsNotNone(self.ex.home, self.ex.note)
+        saved = self.ex.validated
+        self.f['mode'] = 'MANUAL'
+        self.advance()
+        self.assertIsNone(self.ex.home)
+        self.assertIs(self.ex.validated, saved)
 
     def test_prepare_rejects_mixed_or_mislabeled_absolute_plan(self):
         point = TestSequenceCore.absolute_point()
@@ -1232,6 +1286,7 @@ class TestExecutor(unittest.TestCase):
         self.assertIsNotNone(self.ex.validated, self.ex.note)
         self.f.update(armed=True, mode='GUIDED', enabled=True, blockers=[])
         self.advance()
+        self.req('set_home')
         self.ui()
         self.req('execute', max_depth=2)
         self.assertNotEqual(self.ex.core.state, 'RUNNING')
@@ -1250,38 +1305,60 @@ class TestExecutor(unittest.TestCase):
         self.req('prepare')
         self.assertIsNotNone(self.ex.validated, self.ex.note)
         self.f['samples']['position'][0] = 0.60
-        self.f.update(armed=True, mode='GUIDED', enabled=True, blockers=[])
+        self.f.update(
+            armed=True,
+            mode='GUIDED',
+            enabled=True,
+            blockers=[],
+            hold_target=[0.60, 0.0, 0.0, 0.0],
+        )
         self.advance()
+        self.req('set_home')
         phase = self.ex.phase_status(self.now, self.ex.pose(), '')
         self.assertEqual(phase['title'], 'LISTO PARA INICIAR')
         self.ui()
         self.req('execute')
         self.assertEqual(self.ex.core.state, 'RUNNING', self.ex.note)
         self.assertAlmostEqual(self.ex.core.goal.n, 1.1)
-        self.assertAlmostEqual(self.ex.home.n, 0.0)
+        self.assertAlmostEqual(self.ex.home.n, 0.6)
 
     def test_small_pre_execute_drift_uses_current_reference(self):
         self.req('prepare')
         self.assertIsNotNone(self.ex.validated, self.ex.note)
         self.f['samples']['position'] = [0.05, 0, 0.04]
         self.f['samples']['pressure'] += 1000 * 9.80665 * 0.04 / 100
-        self.f.update(armed=True, mode='GUIDED', enabled=True, blockers=[])
+        self.f.update(
+            armed=True,
+            mode='GUIDED',
+            enabled=True,
+            blockers=[],
+            hold_target=[0.05, 0.0, 0.04, 0.0],
+        )
         self.advance()
+        self.req('set_home')
         self.ui()
         self.req('execute')
         self.assertEqual(self.ex.core.state, 'RUNNING', self.ex.note)
         self.assertAlmostEqual(self.ex.core.goal.n, 0.55)
         self.assertAlmostEqual(self.ex.core.goal.depth, 0.24)
 
-    def test_repositioned_plan_still_respects_original_home_radius(self):
+    def test_repositioned_plan_uses_new_guided_home_for_radius(self):
         self.req('prepare')
         self.f['samples']['position'][0] = 1.8
-        self.f.update(armed=True, mode='GUIDED', enabled=True, blockers=[])
+        self.f.update(
+            armed=True,
+            mode='GUIDED',
+            enabled=True,
+            blockers=[],
+            hold_target=[1.8, 0.0, 0.0, 0.0],
+        )
         self.advance()
+        self.req('set_home')
         self.ui()
         self.req('execute')
-        self.assertNotEqual(self.ex.core.state, 'RUNNING')
-        self.assertAlmostEqual(self.ex.home.n, 0.0)
+        self.assertEqual(self.ex.core.state, 'RUNNING', self.ex.note)
+        self.assertAlmostEqual(self.ex.home.n, 1.8)
+        self.assertAlmostEqual(self.ex.core.goal.n, 2.3)
 
     def test_guided_request_after_repositioning_preserves_plan(self):
         self.req('prepare')
@@ -1291,6 +1368,7 @@ class TestExecutor(unittest.TestCase):
         self.advance()
         self.req('guided')
         self.assertIs(self.ex.validated, saved)
+        self.assertIsNone(self.ex.home)
         self.assertIn('GUIDED solicitado', self.ex.note)
 
     def test_ui_loss_cancels_without_auto_resume(self):
@@ -1412,6 +1490,7 @@ class TestExecutor(unittest.TestCase):
         self.req('validate')
         self.f.update(armed=True, mode='GUIDED', enabled=True, blockers=[])
         self.advance()
+        self.req('set_home')
         self.ui()
         self.req('execute', steps=[['advance', 1]])
         self.assertNotEqual(self.ex.core.state, 'RUNNING')

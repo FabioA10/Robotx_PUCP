@@ -85,7 +85,7 @@ class SequenceExecutor(Node):
         self.timer = self.create_timer(0.05, self.tick)
         self.record_event(
             'INFO', 'INICIO', 'Ejecutor de secuencias iniciado',
-            controller_revision='guided_absolute_v1',
+            controller_revision='guided_home_button_v2',
         )
 
     def record_event(self, level, event, detail, **fields):
@@ -163,6 +163,14 @@ class SequenceExecutor(Node):
             self.cancel(reason)
         self.note = reason
         self.record_event('ERROR', 'REFERENCIAS_INVALIDADAS', reason)
+
+    def invalidate_home(self, reason):
+        """Discard only the mission frame while preserving the prepared plan."""
+        if self.home is None:
+            return
+        self.home = None
+        self.note = reason
+        self.record_event('WARN', 'HOME_INVALIDADO', reason)
 
     def cancel(self, reason, action='cancel'):
         self.core.cancel(reason)
@@ -257,6 +265,12 @@ class SequenceExecutor(Node):
                     f'Modo {f.get("mode")}; armado {f.get("armed")}',
                     mode=f.get('mode'),
                     armed=f.get('armed'),
+                )
+            if self.home is not None and (
+                f.get('mode') != 'GUIDED' or f.get('armed') is not True
+            ):
+                self.invalidate_home(
+                    'Home invalidado al abandonar GUIDED o perder el armado'
                 )
             samples_ready = all(
                 f['samples'].get(key) is not None
@@ -422,6 +436,7 @@ class SequenceExecutor(Node):
                 self.prepared_by = None
                 self.reference = None
                 self.home = None
+                self.total = 0
                 f = self.navigation_ready()
                 if f['armed'] or f['mode'] != 'MANUAL':
                     raise ValueError('Preparar requiere MANUAL y ROV desarmado')
@@ -451,7 +466,6 @@ class SequenceExecutor(Node):
                 candidate = Sequence(limits)
                 parsed = candidate.validate(pose, requested_steps, pose)
                 self.reference = (sum(recent) / len(recent), depth, f['samples']['position'][2])
-                self.home = pose
                 self.core.limits = candidate.limits
                 self.plan_mode = plan_mode
                 self.validated = {
@@ -461,9 +475,10 @@ class SequenceExecutor(Node):
                     'plan_mode': plan_mode,
                 }
                 self.prepared_by = [ui, serial]
+                self.total = len(parsed)
                 self.note = (
-                    'Prueba preparada: superficie, Home y plan guardados. '
-                    'No se ha armado ni movido el ROV.'
+                    'Prueba preparada: superficie y plan guardados. '
+                    'Home pendiente hasta fijarlo con GUIDED estable.'
                 )
                 self.record_event(
                     'INFO',
@@ -503,6 +518,41 @@ class SequenceExecutor(Node):
                 self.note = (
                     'Referencia guardada; la profundidad indicada es la del sensor de presión'
                 )
+            elif action == 'set_home':
+                f = self.navigation_ready()
+                if self.validated is None:
+                    raise ValueError('Primero prepara y valida el plan')
+                if f.get('armed') is not True or f.get('mode') != 'GUIDED':
+                    raise ValueError('Fijar Home requiere ROV armado y GUIDED confirmado')
+                if f.get('guided_entry_pending') or f.get('guided_settling'):
+                    raise ValueError('Espera a que GUIDED termine de estabilizarse')
+                if f['blockers']:
+                    raise ValueError('; '.join(f['blockers']))
+                current = self.pose()
+                target = f.get('hold_target')
+                if not isinstance(target, (list, tuple)) or len(target) != 4:
+                    raise ValueError('GUIDED no informa una pose retenida válida')
+                n, e, z, yaw = (number(value) for value in target)
+                measured_z = number(f['samples']['position'][2])
+                home = Pose(n, e, current.depth + z - measured_z, yaw)
+                parsed = self.core.validate(current, self.validated['steps'], home)
+                updated = dict(self.validated)
+                updated['steps'] = parsed
+                updated['pose'] = home
+                self.validated = updated
+                self.home = home
+                self.note = (
+                    'Home fijado en GUIDED: X=0, Y=0 y yaw=0° corresponden '
+                    'a la pose retenida durante la entrada'
+                )
+                self.record_event(
+                    'INFO',
+                    'HOME_FIJADO',
+                    self.note,
+                    home=vars(home),
+                    home_source='guided_hold_target',
+                    plan_mode=self.validated.get('plan_mode', self.plan_mode),
+                )
             elif action == 'home':
                 pose = self.pose()
                 if self.feedback['armed']:
@@ -530,6 +580,8 @@ class SequenceExecutor(Node):
                     raise ValueError('; '.join(self.feedback['blockers']))
                 if not self.feedback['armed'] or self.feedback['mode'] != 'GUIDED':
                     raise ValueError('Requiere armado por el piloto y GUIDED confirmado')
+                if self.home is None:
+                    raise ValueError('Primero pulsa 5 · Fijar Home')
                 if time.monotonic() - self.ui_seen.get(ui, -100) > 0.5:
                     raise ValueError('La interfaz no tiene señal de vida reciente')
                 returning = self.validated['returning']
@@ -564,12 +616,13 @@ class SequenceExecutor(Node):
                 self.run_permit = self.feedback['permit']
                 self.command_serial = 0
                 self.last_output_command = (0.0, 0.0, 0.0, pose.yaw)
-                self.note = 'Ejecución iniciada desde la referencia actual; Home conservado'
+                self.note = 'Ejecución iniciada con el Home fijado en GUIDED'
                 self.record_event(
                     'INFO',
                     'EJECUCION_INICIADA',
                     self.note,
                     run=self.run,
+                    home=vars(self.home),
                     steps=[dict(step) for step in self.core.steps],
                 )
             else:
@@ -717,6 +770,7 @@ class SequenceExecutor(Node):
                 'stopping': f.get('stopping'),
                 'surface': self.reference is not None,
                 'home': vars(self.home) if self.home else None,
+                'home_ready': self.home is not None,
                 'pose': vars(current) if current else None,
                 'validated': self.validated is not None,
                 'prepared_by': self.prepared_by if self.validated is not None else None,
@@ -779,7 +833,9 @@ class SequenceExecutor(Node):
                 ),
                 'event_log_path': self.event_log_path,
                 'holding_completed_goal': f.get('holding_completed_goal', False),
-                'controller_revision': 'guided_absolute_v1',
+                'guided_entry_pending': f.get('guided_entry_pending', False),
+                'guided_settling': f.get('guided_settling', False),
+                'controller_revision': 'guided_home_button_v2',
             },
         )
 
@@ -943,10 +999,30 @@ class SequenceExecutor(Node):
             return {'code': 'BLOQUEADO', 'title': 'ESPERANDO TELEMETRÍA', 'detail': nav_error}
         if self.validated is not None and self.feedback:
             if self.feedback.get('armed') and self.feedback.get('mode') == 'GUIDED':
+                if (
+                    self.feedback.get('guided_entry_pending')
+                    or self.feedback.get('guided_settling')
+                    or self.feedback.get('blockers')
+                ):
+                    detail = '; '.join(self.feedback.get('blockers') or [])
+                    return {
+                        'code': 'ESTABILIZANDO',
+                        'title': 'ESPERANDO GUIDED ESTABLE',
+                        'detail': detail or 'La transición GUIDED todavía no terminó',
+                    }
+                if self.home is None:
+                    return {
+                        'code': 'HOME_PENDIENTE',
+                        'title': 'FIJA EL HOME',
+                        'detail': (
+                            'GUIDED estable: pulsa 5 · Fijar Home para capturar '
+                            'X=0, Y=0 y rumbo 0°'
+                        ),
+                    }
                 return {
                     'code': 'LISTO',
                     'title': 'LISTO PARA INICIAR',
-                    'detail': 'Plan preparado y GUIDED confirmado',
+                    'detail': 'Plan preparado, GUIDED confirmado y Home fijado',
                 }
             if self.feedback.get('armed'):
                 return {
