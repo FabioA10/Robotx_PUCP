@@ -123,6 +123,12 @@ class SeaTracUdpNode(Node):
             10,
         )
 
+        self.frame_raw_publisher = self.create_publisher(
+            String,
+            "seatrac/frame_raw",
+            10,
+        )
+
         # --------------------------------------------------------------
         # UDP transport
         # --------------------------------------------------------------
@@ -267,6 +273,8 @@ class SeaTracUdpNode(Node):
 
                 if not line.startswith("$"):
                     continue
+
+                self.frame_raw_publisher.publish(String(data=line))
 
                 try:
                     frame = bytes.fromhex(line[1:])
@@ -833,6 +841,9 @@ class SeaTracUdpNode(Node):
 
                 message = String()
                 message.data = text
+
+                if text.startswith("$"):
+                    self.frame_raw_publisher.publish(message)
 
                 if text.startswith("$02"):
                     self.raw_publisher.publish(

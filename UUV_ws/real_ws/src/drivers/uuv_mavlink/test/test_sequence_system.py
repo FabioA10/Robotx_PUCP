@@ -141,14 +141,14 @@ class TestSequenceCore(unittest.TestCase):
         self.assertAlmostEqual(core.goal.e, 5.0)
         self.assertAlmostEqual(core.goal.depth, 0.30)
         self.assertAlmostEqual(abs(core.goal.yaw), math.pi)
-        self.assertEqual(core.waypoint_phase, 'DEPTH')
+        self.assertEqual(core.waypoint_phase, 'TRACK')
 
-    def test_absolute_waypoint_executes_depth_then_xy_then_final_yaw(self):
+    def test_absolute_waypoint_tracks_xyz_and_yaw_simultaneously(self):
         limits = Limits(max_depth=2.0, radius=2.0, waypoint_timeout=120.0)
         core = Sequence(limits)
         pose = Pose(0.0, 0.0, 0.10, 0.0)
         core.start(pose, [self.absolute_point()], 0.0, pose)
-        phases = []
+        simultaneous_motion = False
         velocity = [0.0, 0.0, 0.0]
         for tick in range(1, 2401):
             command = core.update(
@@ -158,8 +158,10 @@ class TestSequenceCore(unittest.TestCase):
             )
             if core.state != 'RUNNING':
                 break
-            phases.append(core.waypoint_phase)
             vn, ve, vd, yaw = command
+            simultaneous_motion = simultaneous_motion or (
+                abs(vn) > 1e-6 and abs(vd) > 1e-6 and abs(yaw) > 1e-6
+            )
             velocity = [vn, ve, vd]
             pose = Pose(
                 pose.n + vn * 0.05,
@@ -170,28 +172,434 @@ class TestSequenceCore(unittest.TestCase):
             self.assertLessEqual(math.hypot(vn, ve), 0.150001)
             self.assertLessEqual(abs(vd), 0.080001)
         self.assertEqual(core.state, 'COMPLETED', core.reason)
-        first_translate = phases.index('TRANSLATE')
-        first_yaw = phases.index('YAW')
-        self.assertGreater(first_translate, phases.index('DEPTH'))
-        self.assertGreater(first_yaw, first_translate)
+        self.assertTrue(simultaneous_motion)
         self.assertAlmostEqual(pose.depth, 0.30, delta=0.02)
         self.assertAlmostEqual(pose.n, 0.50, delta=0.04)
         self.assertAlmostEqual(pose.e, 0.00, delta=0.04)
         self.assertAlmostEqual(pose.yaw, math.radians(90), delta=math.radians(5))
 
-    def test_absolute_waypoint_pauses_xy_when_depth_leaves_band(self):
+    def test_absolute_waypoint_keeps_xy_active_while_correcting_depth(self):
         origin = Pose(0.0, 0.0, 0.30, 0.0)
         core = Sequence(Limits(max_depth=2.0, radius=2.0))
         core.start(origin, [self.absolute_point()], 0.0, origin)
-        self.assertEqual(core.waypoint_phase, 'TRANSLATE')
+        self.assertEqual(core.waypoint_phase, 'TRACK')
         command = core.update(
             Pose(0.10, 0.0, 0.34, 0.0),
             0.05,
             velocity=[0.02, 0.0, 0.0],
         )
-        self.assertEqual(core.waypoint_phase, 'DEPTH')
-        self.assertLessEqual(math.hypot(command[0], command[1]), 0.0061)
+        self.assertEqual(core.waypoint_phase, 'TRACK')
+        self.assertGreater(command[0], 0.0)
         self.assertLess(command[2], 0.0)
+
+    def test_absolute_waypoint_uses_axis_box_not_radial_tolerance(self):
+        limits = Limits(max_depth=2.0, radius=2.0, xy_tolerance=0.05)
+        core = Sequence(limits)
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        point = self.absolute_point(yaw_deg=0.0)
+        core.start(origin, [point], 0.0, origin)
+        almost_inside_each_axis = Pose(0.46, 0.04, 0.30, 0.0)
+        core.update(almost_inside_each_axis, 0.05, velocity=[0.0, 0.0, 0.0])
+        self.assertEqual(core.state, 'COMPLETED')
+        self.assertGreater(math.hypot(0.04, 0.04), point.get('tolerance_xy', 0.03))
+
+    def test_absolute_waypoint_detects_box_crossing_between_samples(self):
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        core.start(origin, [self.absolute_point(yaw_deg=0.0)], 0.0, origin)
+        core.update(
+            Pose(0.56, 0.0, 0.30, 0.0),
+            0.05,
+            velocity=[0.15, 0.0, 0.0],
+        )
+        self.assertEqual(core.state, 'COMPLETED')
+        self.assertTrue(core.command_debug['crossed_tolerance_box'])
+
+    def test_absolute_crossing_requires_yaw_at_the_same_time(self):
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        core.start(origin, [self.absolute_point(yaw_deg=0.0)], 0.0, origin)
+        core.update(
+            Pose(0.56, 0.0, 0.30, math.radians(10.0)),
+            0.05,
+            velocity=[0.15, 0.0, 0.0],
+        )
+        self.assertEqual(core.state, 'RUNNING')
+        core.update(
+            Pose(0.50, 0.0, 0.30, 0.0),
+            0.10,
+            velocity=[-0.05, 0.0, 0.0],
+        )
+        self.assertEqual(core.state, 'COMPLETED')
+
+    def test_absolute_stall_activates_bounded_recovery(self):
+        limits = Limits(
+            max_depth=2.0,
+            radius=2.0,
+            recovery_delay=0.5,
+        )
+        core = Sequence(limits)
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        core.start(origin, [self.absolute_point(speed=0.05)], 0.0, origin)
+        command = None
+        for tick in range(1, 31):
+            command = core.update(origin, tick * 0.05, velocity=[0.0, 0.0, 0.0])
+        self.assertTrue(core.recovery_active)
+        self.assertEqual(core.control_mode, 'ABSOLUTE_RECOVERY')
+        self.assertIn('sin progreso', core.recovery_reason)
+        self.assertGreater(command[0], 0.05)
+        self.assertLessEqual(math.hypot(command[0], command[1]), 0.080001)
+
+    def test_absolute_overshoot_activates_recovery(self):
+        limits = Limits(max_depth=2.0, radius=2.0)
+        core = Sequence(limits)
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        core.start(origin, [self.absolute_point()], 0.0, origin)
+        command = None
+        for tick in range(1, 18):
+            command = core.update(
+                Pose(0.61, 0.0, 0.30, math.radians(10.0)),
+                tick * 0.05,
+                velocity=[0.0, 0.0, 0.0],
+            )
+        self.assertTrue(core.recovery_active)
+        self.assertIn('sobrepasó', core.recovery_reason)
+        self.assertLess(command[0], 0.0)
+        self.assertLessEqual(math.hypot(command[0], command[1]), 0.150001)
+
+    def test_absolute_far_cross_track_sample_uses_predictive_alignment(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        core.start(origin, [self.absolute_point(yaw_deg=0.0)], 0.0, origin)
+        core.update(
+            Pose(0.10, 0.16, 0.30, 0.0),
+            0.05,
+            velocity=[0.04, 0.0, 0.0],
+        )
+        self.assertFalse(core.recovery_active)
+        self.assertEqual(core.command_debug['raw_recovery_reason'], '')
+        self.assertTrue(core.command_debug['predictive_correction'])
+        self.assertLess(core.command_debug['cross_command'], 0.0)
+        self.assertLess(core.command_debug['along_command'], 0.15)
+
+    def test_absolute_near_gate_cross_track_fault_requires_persistence(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        core.start(origin, [self.absolute_point(yaw_deg=0.0)], 0.0, origin)
+        for tick in range(1, 16):
+            core.update(
+                Pose(0.35, 0.16, 0.30, 0.0),
+                tick * 0.05,
+                velocity=[0.02, 0.0, 0.0],
+            )
+        self.assertFalse(core.recovery_active)
+        core.update(
+            Pose(0.35, 0.16, 0.30, 0.0),
+            0.80,
+            velocity=[0.02, 0.0, 0.0],
+        )
+        self.assertTrue(core.recovery_active)
+        self.assertIn('fuera del corredor', core.recovery_reason)
+
+    def test_absolute_cross_velocity_predicts_gate_miss_before_large_error(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        core.start(origin, [self.absolute_point(yaw_deg=0.0)], 0.0, origin)
+        core.filtered_velocity = (0.05, 0.12, 0.0)
+        core.update(
+            Pose(0.20, 0.02, 0.30, 0.0),
+            0.05,
+            velocity=[0.05, 0.12, 0.0],
+        )
+        self.assertLess(abs(core.command_debug['cross_error']), 0.04)
+        self.assertGreater(abs(core.command_debug['predicted_cross_error']), 0.04)
+        self.assertTrue(core.command_debug['predictive_correction'])
+        self.assertFalse(core.recovery_active)
+        self.assertAlmostEqual(core.command_debug['along_command'], 0.0)
+        self.assertEqual(
+            core.command_debug['cross_limit'],
+            core.command_debug['profile_speed_limit'],
+        )
+
+    def test_absolute_response_delay_starts_terminal_braking_early(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        core.start(origin, [self.absolute_point(yaw_deg=0.0)], 0.0, origin)
+        core.filtered_velocity = (0.15, 0.0, 0.0)
+        core.update(
+            Pose(0.20, 0.0, 0.30, 0.0),
+            0.05,
+            velocity=[0.15, 0.0, 0.0],
+        )
+        self.assertAlmostEqual(core.command_debug['response_distance'], 0.9)
+        self.assertTrue(core.command_debug['braking'])
+        self.assertLess(core.command_debug['profile_speed_limit'], 0.15)
+        self.assertAlmostEqual(core.command_debug['passage_speed'], 0.03)
+
+    def test_absolute_recovery_returns_only_to_nearest_box_face(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        core.start(
+            origin,
+            [self.absolute_point(yaw_deg=0.0, tolerance_x=0.04)],
+            0.0,
+            origin,
+        )
+        for tick in range(1, 18):
+            core.update(
+                Pose(0.61, 0.0, 0.30, math.radians(10.0)),
+                tick * 0.05,
+                velocity=[0.0, 0.0, 0.0],
+            )
+        self.assertTrue(core.recovery_active)
+        self.assertAlmostEqual(
+            core.command_debug['recovery_return_distance'],
+            0.078,
+            places=3,
+        )
+        self.assertLess(core.command_debug['along_command'], 0.0)
+        self.assertLessEqual(
+            abs(core.command_debug['along_command']),
+            core.command_debug['recovery_speed_limit'],
+        )
+
+    def test_absolute_corridor_respects_large_axis_tolerance(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0, recovery_delay=5.0))
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        point = self.absolute_point(
+            yaw_deg=0.0,
+            tolerance_x=0.01,
+            tolerance_y=0.10,
+        )
+        core.start(origin, [point], 0.0, origin)
+        for tick in range(1, 31):
+            core.update(
+                Pose(0.10, 0.12, 0.30, 0.0),
+                tick * 0.05,
+                velocity=[0.02, 0.0, 0.0],
+            )
+        self.assertAlmostEqual(core.command_debug['recovery_corridor'], 0.15)
+        self.assertFalse(core.recovery_active)
+        self.assertEqual(core.command_debug['raw_recovery_reason'], '')
+
+    def test_absolute_final_point_reduces_speed_before_crossing(self):
+        limits = Limits(max_depth=2.0, radius=2.0)
+        core = Sequence(limits)
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        core.start(origin, [self.absolute_point()], 0.0, origin)
+        command = None
+        for tick in range(1, 11):
+            command = core.update(
+                Pose(0.445, 0.0, 0.30, 0.0),
+                tick * 0.05,
+                velocity=[0.05, 0.0, 0.0],
+            )
+        self.assertFalse(core.recovery_active)
+        self.assertTrue(core.command_debug['braking'])
+        self.assertEqual(core.control_mode, 'ABSOLUTE_CORNER')
+        self.assertLess(core.command_debug['profile_speed_limit'], 0.15)
+        self.assertLessEqual(math.hypot(command[0], command[1]), 0.150001)
+
+    def test_absolute_dwell_remains_compatible_but_does_not_delay_arrival(self):
+        parsed = parse_steps([self.absolute_point(dwell=1.0)])
+        self.assertEqual(parsed[0]['dwell'], 1.0)
+
+    def test_absolute_waypoint_accepts_arrival_without_settle_speed(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        pose = Pose(0.0, 0.0, 0.30, 0.0)
+        point = self.absolute_point(x=0.0, yaw_deg=0.0, dwell=0.5)
+        core.start(pose, [point], 0.0, pose)
+        core.filtered_velocity = (0.025, 0.0, 0.0)
+        core.update(pose, 0.05, velocity=[0.025, 0.0, 0.0])
+        self.assertEqual(core.state, 'COMPLETED')
+
+    def test_absolute_measured_progress_does_not_trigger_recovery(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0, recovery_delay=2.0))
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        core.start(origin, [self.absolute_point()], 0.0, origin)
+        pose = origin
+        for tick in range(1, 61):
+            pose = Pose(pose.n + 0.0005, 0.0, 0.30, 0.0)
+            core.update(pose, tick * 0.05, velocity=[0.01, 0.0, 0.0])
+        self.assertFalse(core.recovery_active)
+        self.assertGreater(core.command_debug['progress_m'], 0.019)
+
+    def test_absolute_recovery_releases_after_progress_resumes(self):
+        limits = Limits(max_depth=2.0, radius=2.0, recovery_delay=0.5)
+        core = Sequence(limits)
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        core.start(origin, [self.absolute_point()], 0.0, origin)
+        for tick in range(1, 31):
+            core.update(origin, tick * 0.05, velocity=[0.0, 0.0, 0.0])
+        self.assertTrue(core.recovery_active)
+        pose = origin
+        for tick in range(31, 111):
+            pose = Pose(pose.n + 0.003, 0.0, 0.30, 0.0)
+            core.update(pose, tick * 0.05, velocity=[0.06, 0.0, 0.0])
+        self.assertFalse(core.recovery_active)
+        self.assertEqual(core.recovery_reason, '')
+
+    def test_absolute_corner_speed_depends_on_turn_angle(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        straight = [
+            self.absolute_point(x=0.5, yaw_deg=0.0),
+            self.absolute_point(x=1.0, yaw_deg=0.0),
+        ]
+        core.start(origin, straight, 0.0, origin)
+        straight_speed, straight_angle = core._corner_plan(core.current_step)
+        self.assertAlmostEqual(straight_speed, 0.15)
+        self.assertAlmostEqual(straight_angle, 0.0)
+        core.cancel('nueva prueba')
+        corner = [
+            self.absolute_point(x=0.5, yaw_deg=0.0),
+            self.absolute_point(x=0.5, y=0.5, yaw_deg=0.0),
+        ]
+        core.start(origin, corner, 1.0, origin)
+        corner_speed, corner_angle = core._corner_plan(core.current_step)
+        self.assertAlmostEqual(corner_speed, 0.0, places=6)
+        self.assertAlmostEqual(corner_angle, 90.0)
+
+    def test_absolute_sharp_corner_waits_for_compatible_velocity_without_dwell(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        steps = [
+            self.absolute_point(x=0.50, y=0.0, yaw_deg=0.0),
+            self.absolute_point(x=0.50, y=0.50, yaw_deg=0.0),
+        ]
+        core.start(origin, steps, 0.0, origin)
+        gate = Pose(0.50, 0.0, 0.30, 0.0)
+        core.filtered_velocity = (0.042, 0.0, 0.0)
+        core.update(gate, 0.05, velocity=[0.042, 0.0, 0.0])
+        self.assertEqual(core.index, 0)
+        self.assertEqual(core.control_mode, 'ABSOLUTE_TURN_TRANSITION')
+        self.assertTrue(core.command_debug['crossed_tolerance_box'])
+        self.assertTrue(core.command_debug['transition_pending'])
+        self.assertGreater(
+            abs(core.command_debug['outgoing_cross_velocity']),
+            core.command_debug['transition_speed_limit'],
+        )
+
+        # One compatible sample is sufficient; there is no timed stability wait.
+        core.filtered_velocity = (0.020, 0.0, 0.0)
+        core.update(gate, 0.10, velocity=[0.020, 0.0, 0.0])
+        self.assertEqual(core.index, 1)
+
+    def test_absolute_straight_waypoint_preserves_cruise_velocity(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        steps = [
+            self.absolute_point(x=0.50, y=0.0, yaw_deg=0.0),
+            self.absolute_point(x=1.00, y=0.0, yaw_deg=0.0),
+        ]
+        core.start(origin, steps, 0.0, origin)
+        core.filtered_velocity = (0.12, 0.0, 0.0)
+        core.last_linear_command = (0.12, 0.0, 0.0)
+        core.update(
+            Pose(0.50, 0.0, 0.30, 0.0),
+            0.05,
+            velocity=[0.12, 0.0, 0.0],
+        )
+        self.assertEqual(core.index, 1)
+        self.assertGreater(core.last_linear_command[0], 0.10)
+
+    def test_absolute_progress_uses_along_track_not_radial_distance(self):
+        core = Sequence(Limits(recovery_delay=1.0))
+        first, elapsed = core._waypoint_progress(0.0, 1.0)
+        second, elapsed = core._waypoint_progress(1.0, 1.0)
+        self.assertEqual(first, 0.0)
+        self.assertEqual(second, 0.0)
+        self.assertEqual(elapsed, 1.0)
+
+    def test_absolute_route_flows_through_straight_intermediate_point(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        pose = Pose(0.0, 0.0, 0.30, 0.0)
+        steps = [
+            self.absolute_point(x=0.30, yaw_deg=0.0),
+            self.absolute_point(x=0.60, yaw_deg=0.0),
+            self.absolute_point(x=0.60, y=0.30, yaw_deg=90.0),
+        ]
+        core.start(pose, steps, 0.0, pose)
+        velocity = [0.0, 0.0, 0.0]
+        transition_speeds = []
+        previous_index = 0
+        for tick in range(1, 2401):
+            command = core.update(pose, tick * 0.05, velocity=velocity)
+            if core.state != 'RUNNING':
+                break
+            vn, ve, vd, yaw = command
+            if core.index != previous_index:
+                transition_speeds.append(math.hypot(vn, ve))
+                previous_index = core.index
+            velocity = [vn, ve, vd]
+            pose = Pose(
+                pose.n + vn * 0.05,
+                pose.e + ve * 0.05,
+                pose.depth + vd * 0.05,
+                yaw,
+            )
+        self.assertEqual(core.state, 'COMPLETED', core.reason)
+        self.assertEqual(len(transition_speeds), 2)
+        self.assertGreater(transition_speeds[0], 0.10)
+        self.assertGreater(transition_speeds[1], 0.0)
+
+    def test_absolute_steps_preserve_measured_motion_between_targets(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        steps = [self.absolute_point(), self.absolute_point(y=0.5)]
+        core.start(origin, steps, 0.0, origin)
+        core.filtered_velocity = (0.01, 0.03, 0.0)
+        core.last_linear_command = (-0.02, -0.06, 0.0)
+        command = core._advance_step(Pose(0.5, 0.0, 0.30, 0.0), 1.0)
+        self.assertEqual(core.filtered_velocity, (0.01, 0.03, 0.0))
+        self.assertEqual(core.last_linear_command, (-0.02, -0.06, 0.0))
+        self.assertEqual(command[:3], core.last_linear_command)
+
+    def test_absolute_corner_transition_has_angle_aware_recovery_grace(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0, recovery_delay=5.0))
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        steps = [
+            self.absolute_point(x=0.50, y=0.0, yaw_deg=0.0),
+            self.absolute_point(x=0.50, y=0.50, yaw_deg=0.0),
+        ]
+        core.start(origin, steps, 0.0, origin)
+        core.last_linear_command = (0.10, 0.0, 0.0)
+        core.filtered_velocity = (0.10, 0.0, 0.0)
+        core._advance_step(Pose(0.50, 0.0, 0.30, 0.0), 1.0)
+        core.last_time = 1.0
+        self.assertAlmostEqual(core.waypoint_transition_angle_deg, 90.0)
+        self.assertAlmostEqual(core.waypoint_transition_grace_until, 2.10)
+        for tick in range(1, 18):
+            core.update(
+                Pose(0.50 + tick * 0.006, tick * 0.001, 0.30, 0.0),
+                1.0 + tick * 0.05,
+                velocity=[0.10, 0.01, 0.0],
+            )
+        self.assertFalse(core.recovery_active)
+        self.assertGreater(core.command_debug['transition_grace_remaining'], 0.0)
+
+    def test_absolute_intermediate_waypoint_does_not_reverse_along_command(self):
+        core = Sequence(Limits(max_depth=2.0, radius=2.0))
+        origin = Pose(0.0, 0.0, 0.30, 0.0)
+        steps = [
+            self.absolute_point(x=0.50, y=0.0, yaw_deg=0.0),
+            self.absolute_point(x=0.50, y=0.50, yaw_deg=0.0),
+        ]
+        core.start(origin, steps, 0.0, origin)
+        core.update(
+            Pose(0.445, 0.0, 0.30, 0.0),
+            0.05,
+            velocity=[0.10, 0.0, 0.0],
+        )
+        self.assertGreater(core.command_debug['along_command'], 0.0)
+        self.assertGreater(core.command_debug['requested_horizontal_command'][0], 0.0)
+
+    def test_absolute_deceleration_slew_is_faster_than_acceleration(self):
+        core = Sequence()
+        accelerating = core._slew_horizontal((0.0, 0.0), (0.2, 0.0), 0.05)
+        braking = core._slew_horizontal((0.2, 0.0), (-0.2, 0.0), 0.05)
+        self.assertAlmostEqual(accelerating[0], 0.006)
+        self.assertAlmostEqual(braking[0], 0.185)
 
     def test_absolute_waypoint_rejects_unsafe_geometry_and_tolerances(self):
         core = Sequence(Limits(max_depth=1.0, radius=0.5))
@@ -199,6 +607,7 @@ class TestSequenceCore(unittest.TestCase):
             self.absolute_point(x=0.6),
             self.absolute_point(depth=1.1),
             self.absolute_point(tolerance_x=0.001),
+            self.absolute_point(tolerance_xy=0.001),
             self.absolute_point(tolerance_yaw_deg=30.0),
         ):
             with self.subTest(point=point), self.assertRaises(ValueError):
@@ -480,17 +889,17 @@ class TestGuidedTransport(unittest.TestCase):
         packet.update(overrides)
         return String(json.dumps(packet))
 
-    def action(self, action):
+    def action(self, action, **fields):
         status = json.loads(self.g.status_pub.messages[-1])
+        packet = {
+            'session': status['session'],
+            'permit': status['permit'],
+            'ticket': status['ticket'],
+            'action': action,
+        }
+        packet.update(fields)
         return String(
-            json.dumps(
-                {
-                    'session': status['session'],
-                    'permit': status['permit'],
-                    'ticket': status['ticket'],
-                    'action': action,
-                }
-            )
+            json.dumps(packet)
         )
 
     def test_disabled_output_never_sends_motion_arm_or_modes(self):
@@ -512,6 +921,53 @@ class TestGuidedTransport(unittest.TestCase):
         ]
         self.assertEqual(packets[-1][1:5], (1, 1, 1, 2503))
         self.assertEqual(packets[-1][8:11], (0.1, 0.0, 0.0))
+
+    def test_completion_requests_poshold_and_confirms_from_heartbeat(self):
+        self.g.receive(self.command())
+        self.g.action(self.action('complete', hold_target=[0, 0, 0, 0]))
+        self.assertEqual(self.g.completion_mode_state, 'pending')
+        self.assertEqual(self.g.completion_mode_attempts, 1)
+        self.assertTrue(self.g.holding_completed_goal)
+        mode_packets = [args for name, args in self.b.master.mav.sent if name == 'set_mode_send']
+        self.assertEqual(mode_packets[-1], (1, 1, 16))
+
+        self.b.mode = 'POSHOLD'
+        self.now += 0.05
+        self.refresh()
+        self.g.tick()
+        self.assertEqual(self.g.completion_mode_state, 'confirmed')
+        self.assertFalse(self.g.holding_completed_goal)
+        status = json.loads(self.g.status_pub.messages[-1])
+        self.assertEqual(status['completion_mode_state'], 'confirmed')
+        self.assertEqual(status['mode'], 'POSHOLD')
+
+    def test_completion_retries_three_times_then_holds_guided(self):
+        self.g.receive(self.command())
+        self.g.action(self.action('complete', hold_target=[0, 0, 0, 0]))
+        for _ in range(3):
+            self.now += 1.01
+            self.refresh()
+            self.g.tick()
+        mode_packets = [
+            args
+            for name, args in self.b.master.mav.sent
+            if name == 'set_mode_send' and args[-1] == 16
+        ]
+        self.assertEqual(len(mode_packets), 3)
+        self.assertEqual(self.g.completion_mode_state, 'failed')
+        self.assertTrue(self.g.holding_completed_goal)
+        self.assertEqual(self.b.mode, 'GUIDED')
+        self.assertIn('espera al operador', self.g.last_reason)
+
+        self.now += 2.0
+        self.refresh()
+        self.g.tick()
+        mode_packets_after = [
+            args
+            for name, args in self.b.master.mav.sent
+            if name == 'set_mode_send' and args[-1] == 16
+        ]
+        self.assertEqual(len(mode_packets_after), 3)
 
     def test_guided_entry_keeps_one_position_controller_and_manual_pose(self):
         self.b.mode = 'MANUAL'
@@ -1155,7 +1611,7 @@ class TestExecutor(unittest.TestCase):
         self.assertAlmostEqual(self.ex.home.yaw, math.pi / 2)
         self.assertAlmostEqual(self.ex.core.goal.n, 0.75)
         self.assertAlmostEqual(self.ex.core.goal.e, -1.5)
-        self.assertEqual(self.ex.core.waypoint_phase, 'DEPTH')
+        self.assertEqual(self.ex.core.waypoint_phase, 'TRACK')
 
     def test_execute_requires_explicit_home_after_guided_is_stable(self):
         self.req('prepare')
@@ -1458,6 +1914,49 @@ class TestExecutor(unittest.TestCase):
         self.assertEqual(phase['code'], 'ESTABILIZANDO')
         self.assertIn('XY 0.05>0.03 m', phase['detail'])
         self.assertIn('vel. 0.04>0.03 m/s', phase['detail'])
+
+    def test_absolute_recovery_is_visible_to_operator(self):
+        pose = Pose(0, 0, 0.3, 0)
+        core = Sequence(Limits(recovery_delay=0.5))
+        core.start(
+            pose,
+            [TestSequenceCore.absolute_point(speed=0.05)],
+            self.now,
+            pose,
+        )
+        for tick in range(1, 29):
+            core.update(pose, self.now + tick * 0.05, velocity=[0, 0, 0])
+        self.ex.core = core
+        self.ex.total = 1
+        phase = self.ex.phase_status(self.now + 1.45, pose, '')
+        self.assertEqual(phase['code'], 'RECUPERACION')
+        self.assertIn('sin progreso suficiente', phase['detail'])
+        self.assertIn('error X 0.500 m', phase['detail'])
+
+    def test_completed_route_reports_poshold_transition_states(self):
+        self.ex.core.state = 'COMPLETED'
+        self.ex.core.reason = 'Secuencia completada'
+        self.f.update(
+            armed=True,
+            mode='GUIDED',
+            completion_mode_state='pending',
+            completion_mode_attempts=2,
+        )
+        self.advance()
+        status = json.loads(self.ex.state_pub.messages[-1])
+        self.assertEqual(status['phase']['code'], 'POSHOLD_PENDIENTE')
+        self.assertIn('Intento 2/3', status['phase']['detail'])
+        self.assertEqual(status['controller_revision'], 'absolute_turn_transition_v6')
+
+        self.f.update(mode='POSHOLD', completion_mode_state='confirmed')
+        self.advance()
+        status = json.loads(self.ex.state_pub.messages[-1])
+        self.assertEqual(status['phase']['code'], 'POSHOLD_CONFIRMADO')
+
+        self.f.update(mode='GUIDED', completion_mode_state='failed')
+        self.advance()
+        status = json.loads(self.ex.state_pub.messages[-1])
+        self.assertEqual(status['phase']['code'], 'POSHOLD_FALLIDO')
 
     def test_stabilizing_phase_reports_confirmation_time(self):
         pose = Pose(0, 0, 0.2, 0)

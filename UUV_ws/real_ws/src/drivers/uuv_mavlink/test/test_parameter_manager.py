@@ -179,11 +179,11 @@ class ParameterManagerTests(unittest.TestCase):
         self.assertEqual(self.manager.last_result, 'rejected')
         self.assertEqual(self.bridge.master.mav.writes, [])
 
-    def test_unconfirmed_firmware_rejects_without_any_write(self):
+    def test_owner_mode_accepts_unconfirmed_firmware_and_starts_snapshot(self):
         self.bridge.guided.version = None
         self.request()
-        self.assertEqual(self.manager.last_result, 'rejected')
-        self.assertIn('4.5.7', self.manager.note)
+        self.assertEqual(self.manager.last_result, 'reading_snapshot')
+        self.assertIsNotNone(self.manager.pending_apply)
         self.assertEqual(self.bridge.master.mav.writes, [])
 
     def test_missing_confirmation_rolls_back_and_verifies_snapshot(self):

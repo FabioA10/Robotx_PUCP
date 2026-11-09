@@ -104,6 +104,40 @@ class UiStateModelTests(unittest.TestCase):
         self.assertTrue(guide['abort_available'])
         self.assertEqual(workflow_states(current, True, True, True)['execute'], 'active')
 
+    def test_poshold_pending_keeps_completed_route_visible(self):
+        current = status(
+            state='COMPLETED',
+            armed=True,
+            mode='GUIDED',
+            phase={'code': 'POSHOLD_PENDIENTE'},
+        )
+        guide = operator_guidance(current, True, True, False)
+        self.assertIn('esperando', guide['message'])
+        self.assertTrue(guide['abort_available'])
+        states = workflow_states(current, True, True, False)
+        self.assertTrue(all(value == 'done' for value in states.values()))
+
+    def test_poshold_confirmation_and_failure_are_distinct(self):
+        confirmed = status(
+            state='COMPLETED',
+            armed=True,
+            mode='POSHOLD',
+            phase={'code': 'POSHOLD_CONFIRMADO'},
+        )
+        failed = status(
+            state='COMPLETED',
+            armed=True,
+            mode='GUIDED',
+            phase={'code': 'POSHOLD_FALLIDO'},
+        )
+        self.assertEqual(
+            operator_guidance(confirmed, True, True, False)['state'],
+            'success',
+        )
+        failure = operator_guidance(failed, True, True, False)
+        self.assertEqual(failure['state'], 'warning')
+        self.assertIn('no confirmado', failure['message'])
+
     def test_controller_tuning_uses_the_physical_executor_contract(self):
         tuning = controller_tuning_payload(0.03, 0.08, 0.08, 0.02, 2.0, 0.8, 1.2)
         self.assertEqual(

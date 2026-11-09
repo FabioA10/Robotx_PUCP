@@ -100,6 +100,9 @@ class GuidedBridge:
         self.last_command_at = 0.0
         self.hold_target = None
         self.holding_completed_goal = False
+        self.completion_mode_state = None
+        self.completion_mode_attempts = 0
+        self.completion_mode_next_attempt = 0.0
         self.guided_request_at = None
         self.guided_settle_started = None
         self.guided_entry_reference = None
@@ -604,7 +607,7 @@ class GuidedBridge:
         return 'MANUAL'
 
     def complete_hold(self, target):
-        """Retain a close final NED target after a healthy positional run."""
+        """Retain the final target while POSHOLD is requested and confirmed."""
         if (
             not self.owner or not self.enabled or not self.b.connected
             or not self.b.armed or self.b.mode != 'GUIDED'
@@ -626,7 +629,7 @@ class GuidedBridge:
                 abs(heading) > math.pi + 0.001
                 or math.hypot(n - position[0], e - position[1]) > 0.25
                 or abs(d - position[2]) > 0.15
-                or heading_error > math.radians(10)
+                or heading_error > math.radians(20)
             ):
                 return False
         except (TypeError, ValueError, IndexError):
@@ -639,8 +642,37 @@ class GuidedBridge:
         self.serial = -1
         self.permit = uuid.uuid4().hex
         self.clear_guided_entry()
-        self.last_reason = 'Secuencia completada; manteniendo objetivo final en GUIDED'
+        self.abort_mode = None
+        self.completion_mode_state = 'pending'
+        self.completion_mode_attempts = 0
+        self.completion_mode_next_attempt = self.clock()
+        self.request_completion_poshold(self.clock())
         return True
+
+    def request_completion_poshold(self, now):
+        """Request POSHOLD at most three times while GUIDED keeps the target."""
+        if self.completion_mode_state != 'pending' or self.completion_mode_attempts >= 3:
+            return False
+        self.send_hold()
+        self.set_mode('POSHOLD')
+        self.completion_mode_attempts += 1
+        self.completion_mode_next_attempt = now + 1.0
+        self.last_reason = (
+            'Ruta completada; POSHOLD pendiente '
+            f'({self.completion_mode_attempts}/3), reteniendo objetivo en GUIDED'
+        )
+        return True
+
+    def confirm_completion_poshold(self):
+        """Release GUIDED output only after heartbeat reports POSHOLD."""
+        self.completion_mode_state = 'confirmed'
+        self.holding_completed_goal = False
+        self.owner = None
+        self.owner_limits = None
+        self.last_command = None
+        self.serial = -1
+        self.abort_mode = None
+        self.last_reason = 'Ruta completada; POSHOLD confirmado por heartbeat'
 
     def completed_hold_health(self):
         """Check the navigation needed by final hold, not DVL diagnostics."""
@@ -823,6 +855,9 @@ class GuidedBridge:
     def stop(self, reason, fallback=None):
         owned = self.owner is not None or self.holding_completed_goal
         self.holding_completed_goal = False
+        self.completion_mode_state = None
+        self.completion_mode_attempts = 0
+        self.completion_mode_next_attempt = 0.0
         self.owner = None
         self.owner_limits = None
         self.last_command = None
@@ -886,7 +921,16 @@ class GuidedBridge:
             self.requests()
             previous_mode = self.mode_at_last_tick
             if b.mode != previous_mode or b.armed != self.armed_at_last_tick:
-                self.stop('Cambio de modo/armado; se requiere nueva ejecución')
+                completion_confirmed = (
+                    self.completion_mode_state == 'pending'
+                    and previous_mode == 'GUIDED'
+                    and b.mode == 'POSHOLD'
+                    and b.armed
+                )
+                if completion_confirmed:
+                    self.confirm_completion_poshold()
+                else:
+                    self.stop('Cambio de modo/armado; se requiere nueva ejecución')
                 self.mode_at_last_tick, self.armed_at_last_tick = b.mode, b.armed
                 if b.mode != 'GUIDED' and self.guided_request_at is None:
                     self.guided_settle_started = None
@@ -978,6 +1022,21 @@ class GuidedBridge:
                     # GUIDED sin ejecución debe tener siempre un setpoint definido.
                     # Mantiene la posición N/E/D capturada y el rumbo actual.
                     self.send_stop()
+                    if self.completion_mode_state == 'pending':
+                        if (
+                            now >= self.completion_mode_next_attempt
+                            and self.completion_mode_attempts < 3
+                        ):
+                            self.request_completion_poshold(now)
+                        elif (
+                            self.completion_mode_attempts >= 3
+                            and now >= self.completion_mode_next_attempt
+                        ):
+                            self.completion_mode_state = 'failed'
+                            self.last_reason = (
+                                'Ruta completada; POSHOLD no confirmado tras 3 intentos. '
+                                'Objetivo final retenido en GUIDED; espera al operador'
+                            )
                     if self.guided_entry_reference is not None:
                         fault = self.guided_entry_fault()
                         if fault:
@@ -1021,6 +1080,8 @@ class GuidedBridge:
                 'guided_settling': self.guided_settle_started is not None,
                 'hold_target': list(self.hold_target) if self.hold_target is not None else None,
                 'holding_completed_goal': self.holding_completed_goal,
+                'completion_mode_state': self.completion_mode_state,
+                'completion_mode_attempts': self.completion_mode_attempts,
                 'controller_revision': 'guided_safety_v4',
                 'dvl_input': self.dvl_input,
                 'samples': {

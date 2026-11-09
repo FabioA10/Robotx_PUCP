@@ -5,13 +5,35 @@ from launch.actions import DeclareLaunchArgument, EmitEvent, RegisterEventHandle
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
     output = ParameterValue(LaunchConfiguration('enable_sequence_output'), value_type=bool)
+    local_backend = IfCondition(
+        PythonExpression(["'", LaunchConfiguration('sequence_backend'), "' == 'local'"])
+    )
+    embedded_backend = IfCondition(
+        PythonExpression(["'", LaunchConfiguration('sequence_backend'), "' == 'embedded'"])
+    )
+    local_sequence_output = ParameterValue(
+        PythonExpression(
+            [
+                "'",
+                LaunchConfiguration('enable_sequence_output'),
+                "'.lower() == 'true' and '",
+                LaunchConfiguration('sequence_backend'),
+                "' == 'local'",
+            ]
+        ),
+        value_type=bool,
+    )
+    local_sequence_monitor = ParameterValue(
+        PythonExpression(["'", LaunchConfiguration('sequence_backend'), "' == 'local'"]),
+        value_type=bool,
+    )
     parameter_write = ParameterValue(
         LaunchConfiguration('enable_parameter_write'), value_type=bool
     )
@@ -28,8 +50,8 @@ def generate_launch_description():
         parameters=[
             {
                 'udp_port': 14552,
-                'sequence_monitor_enabled': True,
-                'enable_sequence_output': output,
+                'sequence_monitor_enabled': local_sequence_monitor,
+                'enable_sequence_output': local_sequence_output,
                 'enable_command_output': output,
                 'enable_arm_disarm': output,
                 'enable_mode_control': False,
@@ -45,6 +67,7 @@ def generate_launch_description():
         package='uuv_mavlink',
         executable='sequence_executor_node',
         output='both',
+        condition=local_backend,
         parameters=[
             {
                 'water_density': ParameterValue(
@@ -53,6 +76,23 @@ def generate_launch_description():
                 'event_log_enabled': True,
                 'event_log_directory': ParameterValue(
                     LaunchConfiguration('event_log_directory'), value_type=str
+                ),
+            }
+        ],
+    )
+    embedded_client = Node(
+        package='uuv_mavlink',
+        executable='embedded_sequence_client_node',
+        output='both',
+        condition=embedded_backend,
+        parameters=[
+            {
+                'agent_url': ParameterValue(
+                    LaunchConfiguration('sequence_agent_url'), value_type=str
+                ),
+                'enable_sequence_output': output,
+                'request_timeout_s': ParameterValue(
+                    LaunchConfiguration('sequence_agent_timeout'), value_type=float
                 ),
             }
         ],
@@ -125,13 +165,29 @@ def generate_launch_description():
     )
     actions = [
         DeclareLaunchArgument(
+            'sequence_backend',
+            default_value='local',
+            choices=['local', 'embedded'],
+            description='local ejecuta en la laptop; embedded ejecuta dentro de BlueOS',
+        ),
+        DeclareLaunchArgument(
+            'sequence_agent_url',
+            default_value='http://192.168.2.2:9132',
+            description='API del agente de secuencias embarcado',
+        ),
+        DeclareLaunchArgument(
+            'sequence_agent_timeout',
+            default_value='0.30',
+            description='Timeout HTTP corto; no gobierna la continuidad embarcada',
+        ),
+        DeclareLaunchArgument(
             'enable_sequence_output',
             default_value='false',
             description='Explicitly enable physical GUIDED, Xbox arm and manual fallback',
         ),
         DeclareLaunchArgument(
             'enable_parameter_write',
-            default_value='false',
+            default_value='true',
             description='Allow guarded persistent writes of the five exposed parameters',
         ),
         DeclareLaunchArgument(
@@ -176,7 +232,7 @@ def generate_launch_description():
             description='JSONL event directory; empty uses ~/.ros/uuv_sequence_logs',
         ),
     ]
-    for node in (bridge, executor, dashboard):
+    for node in (bridge, executor, embedded_client, dashboard):
         actions.append(
             RegisterEventHandler(
                 OnProcessExit(
@@ -188,6 +244,7 @@ def generate_launch_description():
     actions += [
         bridge,
         executor,
+        embedded_client,
         sonar,
         sonar_filter,
         Node(

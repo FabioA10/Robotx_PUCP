@@ -1,3 +1,6 @@
+from glob import glob
+import os
+
 from setuptools import find_packages, setup
 
 package_name = 'usv_control'
@@ -10,8 +13,10 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
+    tests_require=['pytest'],
     zip_safe=True,
     maintainer='robotx',
     maintainer_email='robotx@todo.todo',
@@ -21,6 +26,7 @@ setup(
         'console_scripts': [
             'navigation_node = usv_control.navigation_node:main',
             'position_control_node = usv_control.position_control_node:main',
+            'uuv_follow_preview_node = usv_control.uuv_follow_preview_node:main',
         ],
     },
 )

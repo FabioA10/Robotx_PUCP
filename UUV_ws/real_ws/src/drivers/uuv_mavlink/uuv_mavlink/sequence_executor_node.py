@@ -23,6 +23,9 @@ from .sequence_core import (
 )
 
 
+CONTROLLER_REVISION = 'absolute_turn_transition_v6'
+
+
 class SequenceExecutor(Node):
     def __init__(self):
         super().__init__('uuv_sequence_executor')
@@ -32,6 +35,11 @@ class SequenceExecutor(Node):
         self.declare_parameter('sequence_xy_tolerance_m', 0.03)
         self.declare_parameter('sequence_depth_tolerance_m', 0.02)
         self.declare_parameter('sequence_settle_speed_mps', 0.03)
+        self.declare_parameter('sequence_absolute_decel_mps2', 0.30)
+        self.declare_parameter('sequence_absolute_recovery_progress_m', 0.02)
+        self.declare_parameter('sequence_absolute_response_delay_s', 6.00)
+        self.declare_parameter('sequence_absolute_soft_corridor_m', 0.04)
+        self.declare_parameter('sequence_absolute_recovery_speed_cap_mps', 0.18)
         self.density = float(self.get_parameter('water_density').value)
         if not 950 <= self.density <= 1050:
             raise ValueError('water_density fuera del rango 950–1050 kg/m³')
@@ -85,7 +93,7 @@ class SequenceExecutor(Node):
         self.timer = self.create_timer(0.05, self.tick)
         self.record_event(
             'INFO', 'INICIO', 'Ejecutor de secuencias iniciado',
-            controller_revision='guided_home_button_v2',
+            controller_revision=CONTROLLER_REVISION,
         )
 
     def record_event(self, level, event, detail, **fields):
@@ -354,38 +362,73 @@ class SequenceExecutor(Node):
     def requested_limits(self, packet):
         maximum = number(packet['max_depth'])
         radius = number(packet['radius'])
-        if not 0.2 <= maximum <= 3 or not 0.5 <= radius <= 5:
-            raise ValueError('Límites: profundidad 0.2–3 m, radio 0.5–5 m')
+        if maximum <= 0 or radius <= 0:
+            raise ValueError('Profundidad máxima y radio deben ser positivos')
         horizontal = number(packet['max_horizontal_speed'])
         vertical = number(packet['max_vertical_speed'])
         yaw_deg = number(packet['max_yaw_speed_deg'])
-        if not 0.001 <= horizontal <= 1.0:
-            raise ValueError('Máximo horizontal permitido: 0.001–1.0 m/s')
-        if not 0.001 <= vertical <= 0.5:
-            raise ValueError('Máximo vertical permitido: 0.001–0.5 m/s')
-        if not 0.001 <= yaw_deg <= 90:
-            raise ValueError('Máximo de giro permitido: 0.001–90 °/s')
+        if horizontal <= 0:
+            raise ValueError('El máximo horizontal debe ser positivo')
+        if vertical <= 0:
+            raise ValueError('El máximo vertical debe ser positivo')
+        if yaw_deg <= 0:
+            raise ValueError('El máximo de giro debe ser positivo')
         xy = number(
             packet.get('xy_tolerance', self.get_parameter('sequence_xy_tolerance_m').value)
         )
         depth = number(self.get_parameter('sequence_depth_tolerance_m').value)
         settle = number(self.get_parameter('sequence_settle_speed_mps').value)
+        waypoint_decel = number(
+            self.get_parameter('sequence_absolute_decel_mps2').value
+        )
+        recovery_progress = number(
+            self.get_parameter('sequence_absolute_recovery_progress_m').value
+        )
+        response_delay = number(
+            self.get_parameter('sequence_absolute_response_delay_s').value
+        )
+        soft_corridor = number(
+            self.get_parameter('sequence_absolute_soft_corridor_m').value
+        )
+        recovery_speed_cap = number(
+            self.get_parameter(
+                'sequence_absolute_recovery_speed_cap_mps'
+            ).value
+        )
         if not 0.01 <= xy <= 0.15 or not 0 < depth <= 0.15 or not 0 < settle <= 0.08:
             raise ValueError('Tolerancias fuera del rango de retención permitido')
+        if not 0.12 <= waypoint_decel <= 1.0:
+            raise ValueError('La desaceleración absoluta debe estar entre 0.12 y 1.0 m/s²')
         recovery_radius = number(packet.get('recovery_radius', max(0.08, xy + 0.01)))
         recovery_speed = number(packet.get('recovery_speed', min(0.08, horizontal)))
         recovery_min = number(packet.get('recovery_min_speed', min(0.020, recovery_speed)))
         recovery_delay = number(packet.get('recovery_delay', 2.0))
         position_gain = number(packet.get('position_gain', 0.80))
         velocity_damping = number(packet.get('velocity_damping', 1.20))
-        if not xy + 0.005 <= recovery_radius <= min(0.50, radius):
+        if not xy + 0.005 <= recovery_radius <= radius:
             raise ValueError(
-                'El umbral de recuperación debe superar la tolerancia XY y no exceder 0.50 m'
+                'El umbral de recuperación debe superar la tolerancia XY y no exceder el radio'
             )
         if not 0.001 <= recovery_min <= recovery_speed <= horizontal:
             raise ValueError(
                 'Velocidades de recuperación: 0.001 ≤ impulso mínimo ≤ máximo '
                 '≤ límite horizontal'
+            )
+        if not 0.005 <= recovery_progress < recovery_radius:
+            raise ValueError(
+                'El progreso mínimo debe estar entre 0.005 m y el radio de recuperación'
+            )
+        if not 0.25 <= response_delay <= 12.0:
+            raise ValueError(
+                'El retardo predictivo absoluto debe estar entre 0.25 y 12.0 s'
+            )
+        if not 0.02 <= soft_corridor < recovery_radius:
+            raise ValueError(
+                'El corredor suave debe estar entre 0.02 m y el radio de recuperación'
+            )
+        if not recovery_min <= recovery_speed_cap <= 1.0:
+            raise ValueError(
+                'El límite de retorno debe estar entre el impulso mínimo y 1.0 m/s'
             )
         if not 0.5 <= recovery_delay <= 10:
             raise ValueError('La demora de refuerzo debe estar entre 0.5 y 10 s')
@@ -408,6 +451,11 @@ class SequenceExecutor(Node):
             recovery_speed=recovery_speed,
             recovery_min_speed=recovery_min,
             recovery_delay=recovery_delay,
+            recovery_progress=recovery_progress,
+            waypoint_horizontal_decel=waypoint_decel,
+            waypoint_response_delay=response_delay,
+            waypoint_soft_corridor_min=soft_corridor,
+            waypoint_recovery_speed_cap=recovery_speed_cap,
         )
 
     def on_request(self, msg):
@@ -722,7 +770,7 @@ class SequenceExecutor(Node):
                 filtered_velocity=self.core.filtered_velocity,
                 command_debug=self.core.command_debug,
             )
-        goal = None if self.core.timed else self.core.goal
+        goal = None if self.core.timed else (self.core.goal or self.core.completed_goal)
         timeout_left = None
         if self.core.state == 'RUNNING':
             limit = (
@@ -805,6 +853,30 @@ class SequenceExecutor(Node):
                     'recovery_delay': self.core.limits.recovery_delay,
                     'position_gain': self.core.limits.position_gain,
                     'velocity_damping': self.core.limits.velocity_damping,
+                    'waypoint_horizontal_decel': self.core.limits.waypoint_horizontal_decel,
+                    'recovery_progress': self.core.limits.recovery_progress,
+                    'waypoint_recovery_persistence': (
+                        self.core.limits.waypoint_recovery_persistence
+                    ),
+                    'waypoint_corridor_min': self.core.limits.waypoint_corridor_min,
+                    'waypoint_response_delay': (
+                        self.core.limits.waypoint_response_delay
+                    ),
+                    'waypoint_soft_corridor_min': (
+                        self.core.limits.waypoint_soft_corridor_min
+                    ),
+                    'waypoint_recovery_speed_cap': (
+                        self.core.limits.waypoint_recovery_speed_cap
+                    ),
+                    'waypoint_corner_speed': (
+                        self.core.limits.waypoint_corner_speed
+                    ),
+                    'waypoint_transition_cross_speed': (
+                        self.core.limits.waypoint_transition_cross_speed
+                    ),
+                    'waypoint_straight_angle_deg': (
+                        self.core.limits.waypoint_straight_angle_deg
+                    ),
                 },
                 'errors': self.core.errors,
                 'control_mode': self.core.control_mode,
@@ -833,9 +905,11 @@ class SequenceExecutor(Node):
                 ),
                 'event_log_path': self.event_log_path,
                 'holding_completed_goal': f.get('holding_completed_goal', False),
+                'completion_mode_state': f.get('completion_mode_state'),
+                'completion_mode_attempts': f.get('completion_mode_attempts', 0),
                 'guided_entry_pending': f.get('guided_entry_pending', False),
                 'guided_settling': f.get('guided_settling', False),
-                'controller_revision': 'guided_home_button_v2',
+                'controller_revision': CONTROLLER_REVISION,
             },
         )
 
@@ -869,31 +943,49 @@ class SequenceExecutor(Node):
                     'remaining_s': remaining,
                 }
             if kind in ABSOLUTE_KINDS:
-                phase = self.core.waypoint_phase or 'DEPTH'
-                labels = {
-                    'DEPTH': ('PROFUNDIDAD', 'AJUSTANDO PROFUNDIDAD DEL PUNTO'),
-                    'TRANSLATE': ('AVANCE', 'NAVEGANDO A X-Y ABSOLUTO'),
-                    'YAW': ('RUMBO', 'AJUSTANDO ÁNGULO FINAL'),
-                }
-                code, title = labels.get(
-                    phase,
-                    ('ESTABILIZANDO', 'VERIFICANDO PUNTO ABSOLUTO'),
-                )
+                code, title = 'AVANCE', 'SEGUIMIENTO DIRECTO X-Y-Z-RUMBO'
                 debug = self.core.command_debug
+                if self.core.recovery_active:
+                    code = 'RECUPERACION'
+                    title = 'RECUPERACIÓN DE PUNTO ABSOLUTO'
+                elif debug.get('transition_pending'):
+                    code = 'PREPARANDO_GIRO'
+                    title = 'FRENANDO PARA ENLAZAR EL SIGUIENTE TRAMO'
+                elif debug.get('predictive_correction'):
+                    code = 'ALINEANDO'
+                    title = 'ALINEACIÓN PREDICTIVA CON EL PUNTO'
+                elif debug.get('braking'):
+                    code = 'CURVA'
+                    title = 'VELOCIDAD ADAPTADA PARA EL SIGUIENTE TRAMO'
                 detail = (
-                    f'Punto {self.core.index + 1}/{self.total} · fase {phase} · '
+                    f'Punto {self.core.index + 1}/{self.total} · '
                     f'error X {abs(debug.get("error_x", 0.0)):.3f} m · '
                     f'Y {abs(debug.get("error_y", 0.0)):.3f} m · '
                     f'prof. {abs(debug.get("error_depth", 0.0)):.3f} m · '
                     f'rumbo {abs(debug.get("error_yaw_deg", 0.0)):.1f}°'
                 )
-                if self.core.inside_since is not None:
-                    remaining = max(
-                        0.0,
-                        step['dwell'] - (now - self.core.inside_since),
+                if debug.get('turn_angle_deg') is not None:
+                    detail += (
+                        f' · siguiente giro {debug["turn_angle_deg"]:.1f}° · '
+                        f'límite {debug.get("profile_speed_limit", 0.0):.3f} m/s'
                     )
-                    code = 'ESTABILIZANDO'
-                    detail += f' · confirmando {remaining:.1f} s'
+                if debug.get('transition_pending'):
+                    detail += (
+                        ' · velocidad transversal '
+                        f'{abs(debug.get("outgoing_cross_velocity") or 0.0):.3f}/'
+                        f'{debug.get("transition_speed_limit", 0.0):.3f} m/s'
+                    )
+                if self.core.recovery_active:
+                    recovery_limit = min(
+                        self.core.limits.horizontal_speed,
+                        self.core.limits.recovery_speed,
+                        self.core.limits.waypoint_recovery_speed_cap,
+                        max(0.08, step['speed'] * 0.60),
+                    )
+                    detail += (
+                        f' · {self.core.recovery_reason} · '
+                        f'máx. {recovery_limit:.3f} m/s'
+                    )
                 return {'code': code, 'title': title, 'detail': detail}
             xy, depth, yaw = self.core.errors
             inside = self.core.inside_since is not None
@@ -992,7 +1084,37 @@ class SequenceExecutor(Node):
                 ),
             }
         if self.core.state == 'COMPLETED':
-            return {'code': 'COMPLETADO', 'title': 'PLAN COMPLETADO', 'detail': self.core.reason}
+            transition = (self.feedback or {}).get('completion_mode_state')
+            attempts = (self.feedback or {}).get('completion_mode_attempts', 0)
+            mode = (self.feedback or {}).get('mode')
+            if transition == 'failed':
+                return {
+                    'code': 'POSHOLD_FALLIDO',
+                    'title': 'RUTA COMPLETADA · POSHOLD NO CONFIRMADO',
+                    'detail': (
+                        'El objetivo final permanece retenido en GUIDED después '
+                        'de tres intentos; espera al operador.'
+                    ),
+                }
+            if transition == 'confirmed' or mode == 'POSHOLD':
+                return {
+                    'code': 'POSHOLD_CONFIRMADO',
+                    'title': 'RUTA COMPLETADA · POSHOLD CONFIRMADO',
+                    'detail': 'ArduSub mantiene posición y profundidad.',
+                }
+            if mode == 'GUIDED':
+                return {
+                    'code': 'POSHOLD_PENDIENTE',
+                    'title': 'RUTA COMPLETADA · POSHOLD PENDIENTE',
+                    'detail': (
+                        f'Intento {attempts}/3; el último punto sigue retenido en GUIDED.'
+                    ),
+                }
+            return {
+                'code': 'COMPLETADO',
+                'title': 'PLAN COMPLETADO',
+                'detail': self.core.reason,
+            }
         if self.core.state == 'CANCELLED' and self.validated is None:
             return {'code': 'FALLA', 'title': 'PLAN CANCELADO', 'detail': self.note}
         if nav_error:

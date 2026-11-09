@@ -100,11 +100,11 @@ def normalize_profile(profile):
         SESSION_DEFAULTS,
         {
             'sensor_depth_m': (0.0, 0.50),
-            'maximum_depth_m': (0.20, 3.0),
-            'radius_m': (0.50, 5.0),
-            'max_horizontal_speed_mps': (0.001, 2.0),
-            'max_vertical_speed_mps': (0.001, 1.0),
-            'max_yaw_speed_deg_s': (0.001, 180.0),
+            'maximum_depth_m': (0.001, 1000000.0),
+            'radius_m': (0.001, 1000000.0),
+            'max_horizontal_speed_mps': (0.001, 1000.0),
+            'max_vertical_speed_mps': (0.001, 1000.0),
+            'max_yaw_speed_deg_s': (0.001, 3600.0),
         },
     )
     controller = _group(
@@ -112,7 +112,7 @@ def normalize_profile(profile):
         CONTROLLER_DEFAULTS,
         {
             'xy_tolerance_m': (0.010, 0.150),
-            'recovery_radius_m': (0.015, 0.500),
+            'recovery_radius_m': (0.015, 1000000.0),
             'recovery_speed_mps': (0.001, 2.0),
             'recovery_min_speed_mps': (0.001, 2.0),
             'recovery_delay_s': (0.5, 10.0),
@@ -125,9 +125,9 @@ def normalize_profile(profile):
         VEHICLE_DEFAULTS,
         {
             'propulsion_signal_limit_pct': (1.0, 100.0),
-            'max_ascent_speed_mps': (0.0, 10.0),
-            'max_descent_speed_mps': (0.0, 5.0),
-            'max_vertical_accel_mps2': (0.0, 5.0),
+            'max_ascent_speed_mps': (0.0, 1000.0),
+            'max_descent_speed_mps': (0.0, 1000.0),
+            'max_vertical_accel_mps2': (0.0, 1000.0),
         },
     )
     display_source = profile.get('display')
@@ -148,7 +148,7 @@ def normalize_profile(profile):
 
     if controller['recovery_radius_m'] < controller['xy_tolerance_m'] + 0.005:
         raise ValueError('Recuperar desde debe superar la tolerancia XY en al menos 0.005 m')
-    if controller['recovery_radius_m'] > min(0.50, session['radius_m']):
+    if controller['recovery_radius_m'] > session['radius_m']:
         raise ValueError('Recuperar desde no puede superar el radio de la sesión')
     if controller['recovery_speed_mps'] > session['max_horizontal_speed_mps']:
         raise ValueError('La recuperación supera la velocidad horizontal de la sesión')
@@ -186,9 +186,9 @@ def normalize_raw_parameters(values, observed=False):
     ranges = {
         'MOT_PWM_MIN': (1100, 1499),
         'MOT_PWM_MAX': (1501, 1900),
-        'WPNAV_SPEED_UP': (0, 1000),
-        'WPNAV_SPEED_DN': (0, 500),
-        'WPNAV_ACCEL_Z': (0, 500),
+        'WPNAV_SPEED_UP': (0, 100000),
+        'WPNAV_SPEED_DN': (0, 100000),
+        'WPNAV_ACCEL_Z': (0, 100000),
     }
     result = {
         name: _number(values[name], name, *ranges[name])
@@ -242,7 +242,7 @@ def _migrate_profile(profile, version):
             raise ValueError(
                 'max_vertical_accel_mps2: valor no numérico en el perfil anterior'
             ) from exc
-        vehicle['max_vertical_accel_mps2'] = min(5.0, max(0.0, previous_accel))
+        vehicle['max_vertical_accel_mps2'] = min(1000.0, max(0.0, previous_accel))
         migrated['vehicle'] = vehicle
     return migrated
 

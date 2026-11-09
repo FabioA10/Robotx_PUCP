@@ -26,6 +26,8 @@ setup(
         'console_scripts': [
             'mavlink_bridge_node = uuv_mavlink.mavlink_bridge_node:main',
             'manual_control_preview_node = uuv_mavlink.manual_control_preview_node:main',
+            'embedded_sequence_client_node = '
+            'uuv_mavlink.embedded_sequence_client_node:main',
             'sequence_executor_node = uuv_mavlink.sequence_executor_node:main',
         ],
     },

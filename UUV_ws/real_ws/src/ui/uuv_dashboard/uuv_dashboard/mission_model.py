@@ -35,8 +35,8 @@ def normalize_step(step):
     if kind == 'absolute_waypoint':
         return {
             'kind': kind,
-            'x': _number(step.get('x'), 'X', -5.0, 5.0),
-            'y': _number(step.get('y'), 'Y', -5.0, 5.0),
+            'x': _number(step.get('x'), 'X', -1000000.0, 1000000.0),
+            'y': _number(step.get('y'), 'Y', -1000000.0, 1000000.0),
             'depth': _number(step.get('depth'), 'Profundidad', 0.0, 3.0),
             'yaw_deg': _number(step.get('yaw_deg'), 'Ángulo', -180.0, 180.0),
             'speed': _number(step.get('speed'), 'Velocidad X-Y', 0.001, 2.0),
@@ -54,7 +54,6 @@ def normalize_step(step):
             'tolerance_yaw_deg': _number(
                 step.get('tolerance_yaw_deg'), 'Tolerancia angular', 1.0, 20.0
             ),
-            'dwell': _number(step.get('dwell'), 'Confirmación estable', 0.5, 5.0),
         }
     if kind == 'wait':
         return {
@@ -69,7 +68,7 @@ def normalize_step(step):
             'duration': _number(step.get('duration'), 'Duración', 0.1, 5.0),
         }
     if kind in {'advance', 'lateral', 'turn', 'depth'}:
-        value_range = (-180.0, 180.0) if kind == 'turn' else (-5.0, 5.0)
+        value_range = (-180.0, 180.0) if kind == 'turn' else (-1000000.0, 1000000.0)
         if kind == 'depth':
             value_range = (0.0, 3.0)
         return {
@@ -201,7 +200,6 @@ def mission_metrics(mission):
             distance += horizontal
             minimum_time += horizontal / step['speed']
             minimum_time += vertical / step['vertical_speed']
-            minimum_time += step['dwell']
             previous_x, previous_y, previous_depth = (
                 step['x'], step['y'], step['depth']
             )
@@ -232,8 +230,8 @@ def rectangle_waypoints(template, width, height):
     template = normalize_step(template)
     if template['kind'] != 'absolute_waypoint':
         raise ValueError('La plantilla del rectángulo debe ser un punto absoluto')
-    width = _number(width, 'Ancho X', -5.0, 5.0)
-    height = _number(height, 'Largo Y', -5.0, 5.0)
+    width = _number(width, 'Ancho X', -1000000.0, 1000000.0)
+    height = _number(height, 'Largo Y', -1000000.0, 1000000.0)
     if abs(width) < 0.01 or abs(height) < 0.01:
         raise ValueError('El rectángulo requiere lados de al menos 0.01 m')
     result = []

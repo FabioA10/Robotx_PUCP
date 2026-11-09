@@ -298,7 +298,7 @@ class SequenceDashboard(PoolDashboard):
             0,
         )
         self.maximum_depth = QDoubleSpinBox()
-        self.maximum_depth.setRange(0.2, 3)
+        self.maximum_depth.setRange(0.001, 1000000.0)
         self.maximum_depth.setDecimals(2)
         self.maximum_depth.setSingleStep(0.01)
         self.maximum_depth.setKeyboardTracking(False)
@@ -313,28 +313,28 @@ class SequenceDashboard(PoolDashboard):
             0,
         )
         self.radius = QDoubleSpinBox()
-        self.radius.setRange(0.5, 5)
+        self.radius.setRange(0.001, 1000000.0)
         self.radius.setDecimals(2)
         self.radius.setSingleStep(0.05)
         self.radius.setValue(0.5)
         limits_grid.addWidget(self.radius, 2, 1)
         limits_grid.addWidget(self.field_label('Máx. horizontal [m/s]'), 3, 0)
         self.max_horizontal_speed = QDoubleSpinBox()
-        self.max_horizontal_speed.setRange(0.001, 2.0)
+        self.max_horizontal_speed.setRange(0.001, 1000.0)
         self.max_horizontal_speed.setDecimals(3)
         self.max_horizontal_speed.setSingleStep(0.01)
         self.max_horizontal_speed.setValue(0.20)
         limits_grid.addWidget(self.max_horizontal_speed, 3, 1)
         limits_grid.addWidget(self.field_label('Máx. vertical [m/s]'), 4, 0)
         self.max_vertical_speed = QDoubleSpinBox()
-        self.max_vertical_speed.setRange(0.001, 1.0)
+        self.max_vertical_speed.setRange(0.001, 1000.0)
         self.max_vertical_speed.setDecimals(3)
         self.max_vertical_speed.setSingleStep(0.01)
         self.max_vertical_speed.setValue(0.10)
         limits_grid.addWidget(self.max_vertical_speed, 4, 1)
         limits_grid.addWidget(self.field_label('Máx. giro [°/s]'), 5, 0)
         self.max_yaw_speed = QDoubleSpinBox()
-        self.max_yaw_speed.setRange(0.001, 180.0)
+        self.max_yaw_speed.setRange(0.001, 3600.0)
         self.max_yaw_speed.setDecimals(3)
         self.max_yaw_speed.setSingleStep(1.0)
         self.max_yaw_speed.setValue(10.0)
@@ -535,7 +535,7 @@ class SequenceDashboard(PoolDashboard):
             0,
         )
         self.max_ascent_speed = QDoubleSpinBox()
-        self.max_ascent_speed.setRange(0.0, 10.0)
+        self.max_ascent_speed.setRange(0.0, 1000.0)
         self.max_ascent_speed.setDecimals(2)
         self.max_ascent_speed.setSingleStep(0.05)
         self.max_ascent_speed.setValue(0.10)
@@ -550,7 +550,7 @@ class SequenceDashboard(PoolDashboard):
             0,
         )
         self.max_descent_speed = QDoubleSpinBox()
-        self.max_descent_speed.setRange(0.0, 5.0)
+        self.max_descent_speed.setRange(0.0, 1000.0)
         self.max_descent_speed.setDecimals(2)
         self.max_descent_speed.setSingleStep(0.05)
         self.max_descent_speed.setValue(0.10)
@@ -566,7 +566,7 @@ class SequenceDashboard(PoolDashboard):
             0,
         )
         self.max_vertical_accel = QDoubleSpinBox()
-        self.max_vertical_accel.setRange(0.0, 5.0)
+        self.max_vertical_accel.setRange(0.0, 1000.0)
         self.max_vertical_accel.setDecimals(2)
         self.max_vertical_accel.setSingleStep(0.05)
         self.max_vertical_accel.setValue(0.50)
@@ -1096,8 +1096,9 @@ class SequenceDashboard(PoolDashboard):
         explanation = QLabel(
             'Con GUIDED estable, pulsa 5 · Fijar Home: la pose y el rumbo retenidos '
             'al entrar en GUIDED serán X=0, Y=0 y ángulo 0°. La profundidad permanece '
-            'absoluta respecto a la superficie calibrada. Cada punto ejecuta: '
-            'profundidad → X-Y → ángulo → verificación.'
+            'absoluta respecto a la superficie calibrada. X, Y, profundidad y ángulo '
+            'se corrigen simultáneamente. Los puntos intermedios son zonas de paso; '
+            'el último solicita POSHOLD.'
         )
         explanation.setObjectName('MutedText')
         explanation.setWordWrap(True)
@@ -1106,11 +1107,11 @@ class SequenceDashboard(PoolDashboard):
         editor = QGroupBox('Editor de punto absoluto local')
         grid = QGridLayout(editor)
         specs = (
-            ('X desde origen [m]', 'absolute_x', -5.0, 5.0, 3, 0.05, 0.0),
-            ('Y desde origen [m]', 'absolute_y', -5.0, 5.0, 3, 0.05, 0.0),
-            ('Profundidad [m]', 'absolute_depth', 0.0, 3.0, 3, 0.02, 0.20),
+            ('X desde origen [m]', 'absolute_x', -1000000.0, 1000000.0, 3, 0.05, 0.0),
+            ('Y desde origen [m]', 'absolute_y', -1000000.0, 1000000.0, 3, 0.05, 0.0),
+            ('Profundidad [m]', 'absolute_depth', 0.0, 1000000.0, 3, 0.02, 0.20),
             ('Ángulo absoluto [°]', 'absolute_yaw', -180.0, 180.0, 1, 5.0, 0.0),
-            ('Velocidad X-Y [m/s]', 'absolute_speed', 0.001, 2.0, 3, 0.01, 0.15),
+            ('Velocidad X-Y [m/s]', 'absolute_speed', 0.001, 1000.0, 3, 0.01, 0.15),
             ('Tolerancia X [m]', 'absolute_tolerance_x', 0.01, 0.15, 3, 0.005, 0.04),
             ('Tolerancia Y [m]', 'absolute_tolerance_y', 0.01, 0.15, 3, 0.005, 0.04),
             (
@@ -1123,7 +1124,6 @@ class SequenceDashboard(PoolDashboard):
                 0.02,
             ),
             ('Tolerancia angular [°]', 'absolute_tolerance_yaw', 1.0, 20.0, 1, 1.0, 5.0),
-            ('Confirmación estable [s]', 'absolute_dwell', 0.5, 5.0, 1, 0.5, 1.0),
         )
         self.absolute_inputs = []
         for index, (label, attribute, minimum, maximum, decimals, step, value) in enumerate(
@@ -1180,9 +1180,9 @@ class SequenceDashboard(PoolDashboard):
         self.absolute_plan_editor = editor
         layout.addWidget(editor)
 
-        self.absolute_list = QTableWidget(0, 8)
+        self.absolute_list = QTableWidget(0, 7)
         self.absolute_list.setHorizontalHeaderLabels(
-            ('#', 'X', 'Y', 'Prof.', 'Ángulo', 'Vel. X-Y', 'Tol. X/Y/Z/°', 'Estable')
+            ('#', 'X', 'Y', 'Prof.', 'Ángulo', 'Vel. X-Y', 'Tol. X/Y/Z/°')
         )
         self.absolute_list.setAlternatingRowColors(True)
         self.absolute_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -1191,7 +1191,7 @@ class SequenceDashboard(PoolDashboard):
         self.absolute_list.verticalHeader().setVisible(False)
         header = self.absolute_list.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        for column in range(1, 8):
+        for column in range(1, 7):
             header.setSectionResizeMode(column, QHeaderView.Stretch)
         self.absolute_list.currentCellChanged.connect(
             lambda row, _column, _old_row, _old_column: self.load_absolute_waypoint(row)
@@ -1246,7 +1246,6 @@ class SequenceDashboard(PoolDashboard):
             'tolerance_y': self.absolute_tolerance_y.value(),
             'tolerance_depth': self.absolute_tolerance_depth.value(),
             'tolerance_yaw_deg': self.absolute_tolerance_yaw.value(),
-            'dwell': self.absolute_dwell.value(),
         }
 
     def add_absolute_waypoint(self):
@@ -1283,12 +1282,11 @@ class SequenceDashboard(PoolDashboard):
             'tolerance_y': self.absolute_tolerance_y.value(),
             'tolerance_depth': self.absolute_tolerance_depth.value(),
             'tolerance_yaw_deg': self.absolute_tolerance_yaw.value(),
-            'dwell': self.absolute_dwell.value(),
         }
         answer = QMessageBox.question(
             self,
             'Aplicar tolerancias',
-            '¿Aplicar las tolerancias y permanencia actuales a todos los puntos?',
+            '¿Aplicar las tolerancias actuales a todos los puntos?',
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -1414,7 +1412,6 @@ class SequenceDashboard(PoolDashboard):
         self.absolute_tolerance_y.setValue(point['tolerance_y'])
         self.absolute_tolerance_depth.setValue(point['tolerance_depth'])
         self.absolute_tolerance_yaw.setValue(point['tolerance_yaw_deg'])
-        self.absolute_dwell.setValue(point['dwell'])
 
     def update_absolute_waypoints(self, selected_row=None):
         if not hasattr(self, 'absolute_list'):
@@ -1435,7 +1432,6 @@ class SequenceDashboard(PoolDashboard):
                     f'{point["tolerance_depth"]:.3f}/'
                     f'{point["tolerance_yaw_deg"]:.1f}°'
                 ),
-                f'{point["dwell"]:.1f} s',
             )
             for column, text in enumerate(cells):
                 item = QTableWidgetItem(text)
@@ -2183,7 +2179,7 @@ class SequenceDashboard(PoolDashboard):
 
         self.read_parameters_button.setEnabled(connected and not busy)
         self.apply_parameters_button.setEnabled(
-            safe and complete and not busy and not matching
+            safe and complete and not busy
         )
         self.restore_parameters_button.setEnabled(
             safe
@@ -2206,7 +2202,7 @@ class SequenceDashboard(PoolDashboard):
             text = status.get('note') or 'La operación no fue aplicada.'
             state = 'danger' if status.get('result') == 'failed_partial' else 'warning'
         elif matching:
-            text = 'ROV verificado: los cinco parámetros coinciden con este perfil.'
+            text = 'ROV verificado: coincide con el perfil; puede volver a aplicarlo si lo desea.'
             state = 'success'
         elif complete:
             text = (
@@ -2257,7 +2253,7 @@ class SequenceDashboard(PoolDashboard):
         recovery_radius = self.recovery_radius.value()
         self.recovery_radius.setRange(
             self.xy_tolerance.value() + 0.005,
-            min(0.50, self.radius.value()),
+            self.radius.value(),
         )
         self.recovery_radius.setValue(recovery_radius)
 
@@ -2777,7 +2773,12 @@ class SequenceDashboard(PoolDashboard):
             'ESTABILIZANDO': 'info',
             'CORRIGIENDO': 'warning',
             'RECUPERACION': 'warning',
+            'CURVA': 'info',
+            'ALINEANDO': 'info',
             'COMPLETADO': 'success',
+            'POSHOLD_PENDIENTE': 'info',
+            'POSHOLD_CONFIRMADO': 'success',
+            'POSHOLD_FALLIDO': 'warning',
             'LISTO': 'success',
             'LISTO_GUIDED': 'info',
             'HOME_PENDIENTE': 'info',

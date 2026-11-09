@@ -8,11 +8,11 @@ from std_msgs.msg import String
 from rclpy.qos import qos_profile_sensor_data
 
 def wrap_to_pi(angle):
-    """Wraps an angle in radians to [-pi, pi]."""
+    """Wrap an angle in radians to [-pi, pi]."""
     return math.atan2(math.sin(angle), math.cos(angle))
 
 def quaternion_to_yaw(q):
-    """Extracts yaw (heading) in radians from a quaternion."""
+    """Extract yaw (heading) in radians from a quaternion."""
     siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     return math.atan2(siny_cosp, cosy_cosp)

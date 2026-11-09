@@ -82,6 +82,12 @@ class SeaTracSerialNode(Node):
             10,
         )
 
+        self.frame_raw_publisher = self.create_publisher(
+            String,
+            "seatrac/frame_raw",
+            10,
+        )
+
         self.serial_port = serial.Serial(
             port=self.port,
             baudrate=self.baudrate,
@@ -612,6 +618,9 @@ class SeaTracSerialNode(Node):
 
                 message = String()
                 message.data = text
+
+                if text.startswith("$"):
+                    self.frame_raw_publisher.publish(message)
 
                 if text.startswith("$02"):
                     self.raw_publisher.publish(message)

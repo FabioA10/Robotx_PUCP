@@ -36,6 +36,15 @@ def workflow_states(status, fresh, has_steps, plan_matches):
         states['prepare'] = 'blocked'
         return states
 
+    phase_code = (status.get('phase') or {}).get('code')
+    if phase_code in (
+        'COMPLETADO',
+        'POSHOLD_PENDIENTE',
+        'POSHOLD_CONFIRMADO',
+        'POSHOLD_FALLIDO',
+    ):
+        return {name: 'done' for name in STAGES}
+
     prepared = plan_matches and status.get('validated', False)
     if not prepared:
         states['prepare'] = (
@@ -69,10 +78,7 @@ def workflow_states(status, fresh, has_steps, plan_matches):
         return states
     states['home'] = 'done'
 
-    phase_code = (status.get('phase') or {}).get('code')
-    if phase_code == 'COMPLETADO':
-        states['execute'] = 'done'
-    elif status.get('state') == 'RUNNING':
+    if status.get('state') == 'RUNNING':
         states['execute'] = 'active'
     else:
         states['execute'] = (
@@ -93,6 +99,30 @@ def operator_guidance(status, fresh, has_steps, plan_matches):
             'state': 'warning',
             'reasons': ['No hay un estado reciente del ejecutor.'],
             'abort_available': False,
+        }
+    phase_code = (status.get('phase') or {}).get('code')
+    if phase_code == 'POSHOLD_PENDIENTE':
+        return {
+            'message': 'Ruta completada · esperando confirmación de POSHOLD',
+            'state': 'info',
+            'reasons': ['El último objetivo permanece retenido en GUIDED.'],
+            'abort_available': True,
+        }
+    if phase_code == 'POSHOLD_CONFIRMADO':
+        return {
+            'message': 'Ruta completada · POSHOLD confirmado',
+            'state': 'success',
+            'reasons': ['ArduSub mantiene posición y profundidad.'],
+            'abort_available': True,
+        }
+    if phase_code == 'POSHOLD_FALLIDO':
+        return {
+            'message': 'Ruta completada · POSHOLD no confirmado',
+            'state': 'warning',
+            'reasons': [
+                'El último objetivo sigue retenido en GUIDED; decide el modo manualmente.'
+            ],
+            'abort_available': True,
         }
     if status.get('state') == 'RUNNING':
         return {

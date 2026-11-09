@@ -49,7 +49,7 @@ class Limits:
     max_turn_deg: float = 90.0
     max_depth_m: float = 3.0
     max_wait_s: float = 10.0
-    max_total_advance_m: float = 5.0
+    max_total_advance_m: float = 1000000.0
     max_total_wait_s: float = 30.0
 
 

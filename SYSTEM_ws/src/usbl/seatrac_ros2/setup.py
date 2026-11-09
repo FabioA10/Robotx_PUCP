@@ -1,5 +1,7 @@
+"""Package and executable installation for the SeaTrac ROS 2 driver."""
+
+import glob
 import os
-from glob import glob
 
 from setuptools import find_packages, setup
 
@@ -22,7 +24,7 @@ setup(
         ),
         (
             'share/' + package_name,
-            ['package.xml'],
+            ['package.xml', 'USBL_INTERFACE.md'],
         ),
         (
             os.path.join(
@@ -30,7 +32,7 @@ setup(
                 package_name,
                 'launch',
             ),
-            glob('launch/*.launch.py'),
+            glob.glob('launch/*.launch.py'),
         ),
         (
             os.path.join(
@@ -38,7 +40,7 @@ setup(
                 package_name,
                 'config',
             ),
-            glob('config/*.yaml'),
+            glob.glob('config/*.yaml') + glob.glob('config/*.csv'),
         ),
     ],
 
@@ -64,8 +66,24 @@ setup(
         ],
     },
 
+    tests_require=[
+        'pytest',
+    ],
+
     entry_points={
         'console_scripts': [
+            (
+                'seatrac_csv_analyze = '
+                'seatrac_ros2.csv_analyze:main'
+            ),
+            (
+                'fake_usbl_node = '
+                'seatrac_ros2.fake_usbl_node:main'
+            ),
+            (
+                'seatrac_csv_replay = '
+                'seatrac_ros2.csv_replay_node:main'
+            ),
             (
                 'seatrac_status_node = '
                 'seatrac_ros2.seatrac_status_node:main'

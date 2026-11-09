@@ -1,0 +1,8 @@
+# X150 on USV tracking X110/X010 on UUV. Normalized base_link frame only.
+# Body columns are NOT native SeaTrac Easting/Northing/Depth fields.
+# Verify heading, mounting and native-to-body conversion before creating CSV.
+timestamp_s,body_forward_m,body_left_m,body_up_m,beacon_id,range_m,fit_error,rssi_db,position_valid,position_filter_error
+0.0,2.00,0.20,-0.30,2,2.03,0.40,126.0,true,false
+0.5,2.05,0.15,-0.31,2,2.08,0.55,125.5,true,false
+1.0,2.10,0.10,-0.30,2,2.13,2.20,124.8,true,false
+1.5,2.15,0.05,-0.29,2,2.17,0.60,125.2,true,false

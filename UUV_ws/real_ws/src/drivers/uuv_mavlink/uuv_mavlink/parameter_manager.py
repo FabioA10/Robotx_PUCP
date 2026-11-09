@@ -146,10 +146,6 @@ class AutopilotParameterManager:
             deadman=bool(self.bridge.deadman),
             sequence_active=self._sequence_active(),
         )
-        guided = getattr(self.bridge, 'guided', None)
-        version = getattr(guided, 'version', None) if guided is not None else None
-        if version != [4, 5, 7]:
-            reasons.append('firmware ArduSub 4.5.7 todavía no confirmado')
         return reasons
 
     def _request_all(self):

@@ -64,9 +64,9 @@ def normalize_parameter_values(values):
     normalized = {
         'MOT_PWM_MIN': _number(values['MOT_PWM_MIN'], 'MOT_PWM_MIN', 1100, 1499),
         'MOT_PWM_MAX': _number(values['MOT_PWM_MAX'], 'MOT_PWM_MAX', 1501, 1900),
-        'WPNAV_SPEED_UP': _number(values['WPNAV_SPEED_UP'], 'WPNAV_SPEED_UP', 0, 1000),
-        'WPNAV_SPEED_DN': _number(values['WPNAV_SPEED_DN'], 'WPNAV_SPEED_DN', 0, 500),
-        'WPNAV_ACCEL_Z': _number(values['WPNAV_ACCEL_Z'], 'WPNAV_ACCEL_Z', 0, 500),
+        'WPNAV_SPEED_UP': _number(values['WPNAV_SPEED_UP'], 'WPNAV_SPEED_UP', 0, 100000),
+        'WPNAV_SPEED_DN': _number(values['WPNAV_SPEED_DN'], 'WPNAV_SPEED_DN', 0, 100000),
+        'WPNAV_ACCEL_Z': _number(values['WPNAV_ACCEL_Z'], 'WPNAV_ACCEL_Z', 0, 100000),
     }
     low_span = 1500.0 - normalized['MOT_PWM_MIN']
     high_span = normalized['MOT_PWM_MAX'] - 1500.0
@@ -85,9 +85,9 @@ def normalize_observed_parameter_values(values):
     normalized = {
         'MOT_PWM_MIN': _number(values['MOT_PWM_MIN'], 'MOT_PWM_MIN', 1100, 1499),
         'MOT_PWM_MAX': _number(values['MOT_PWM_MAX'], 'MOT_PWM_MAX', 1501, 1900),
-        'WPNAV_SPEED_UP': _number(values['WPNAV_SPEED_UP'], 'WPNAV_SPEED_UP', 0, 1000),
-        'WPNAV_SPEED_DN': _number(values['WPNAV_SPEED_DN'], 'WPNAV_SPEED_DN', 0, 500),
-        'WPNAV_ACCEL_Z': _number(values['WPNAV_ACCEL_Z'], 'WPNAV_ACCEL_Z', 0, 500),
+        'WPNAV_SPEED_UP': _number(values['WPNAV_SPEED_UP'], 'WPNAV_SPEED_UP', 0, 100000),
+        'WPNAV_SPEED_DN': _number(values['WPNAV_SPEED_DN'], 'WPNAV_SPEED_DN', 0, 100000),
+        'WPNAV_ACCEL_Z': _number(values['WPNAV_ACCEL_Z'], 'WPNAV_ACCEL_Z', 0, 100000),
     }
     low_span = 1500.0 - normalized['MOT_PWM_MIN']
     high_span = normalized['MOT_PWM_MAX'] - 1500.0

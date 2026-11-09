@@ -77,6 +77,28 @@ class TestMissionEditing(unittest.TestCase):
         self.assertEqual([(p['x'], p['y']) for p in points], [
             (0.5, 0.0), (0.5, -0.4), (0.0, -0.4), (0.0, 0.0),
         ])
+        self.assertNotIn('dwell', points[0])
+
+    def test_absolute_metrics_do_not_add_obsolete_dwell(self):
+        point = {
+            'kind': 'absolute_waypoint',
+            'x': 0.1,
+            'y': 0.0,
+            'depth': 0.0,
+            'yaw_deg': 0.0,
+            'speed': 0.1,
+            'vertical_speed': 0.08,
+            'yaw_speed_deg': 10.0,
+            'tolerance_x': 0.04,
+            'tolerance_y': 0.04,
+            'tolerance_depth': 0.02,
+            'tolerance_yaw_deg': 5.0,
+            'dwell': 5.0,
+        }
+        metrics = mission_metrics(
+            {'plan_mode': 'absolute', 'relative_steps': [], 'absolute_steps': [point]}
+        )
+        self.assertAlmostEqual(metrics['minimum_time_s'], 1.0)
 
 
 class TestMissionStore(unittest.TestCase):
