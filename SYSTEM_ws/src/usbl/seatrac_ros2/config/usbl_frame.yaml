@@ -1,0 +1,57 @@
+# USBL frame contract for the X150 installed on the USV.
+#
+# This file is intentionally NOT a ROS parameter file.  It is a versioned
+# measurement record for the future SeaTrac position adapter.  A decoder must
+# refuse to publish /usbl/relative_pose while verification.status is not
+# "verified".  Do not change that status until the mounting transform and
+# native SeaTrac axes have been measured in a controlled test.
+
+schema_version: 1
+
+verification:
+  status: unverified
+  verified_at: null
+  verified_by: null
+  evidence_session: null
+
+frames:
+  output: base_link
+  sensor: x150_link
+  output_convention:
+    x: forward
+    y: left
+    z: up
+
+x150_mount:
+  # Transform from x150_link origin to base_link, pending measurement.
+  translation_m:
+    x: null
+    y: null
+    z: null
+  rotation_rpy_deg:
+    roll: null
+    pitch: null
+    yaw: null
+  measurement_method: pending
+
+seatrac:
+  local_model: X150
+  local_firmware: unknown
+  remote_model: unknown
+  expected_beacon_id: null
+  native_axis_convention: unknown
+  native_angle_units: unknown
+  native_range_units: unknown
+
+attitude:
+  source: unknown
+  frame: unknown
+  required_at_acquisition_time: true
+
+publication_policy:
+  topic: /usbl/relative_pose
+  message_type: geometry_msgs/msg/PoseWithCovarianceStamped
+  require_verified_mount: true
+  reject_unknown_native_axes: true
+  reject_missing_attitude: true
+  infer_uuv_orientation: false

@@ -1,0 +1,36 @@
+robocommand_usv_bridge:
+  ros__parameters:
+    # -------------------------------------------------------------------------
+    # RoboCommand MQTT Broker Configuration (§3.4.2, §3.4.5)
+    # -------------------------------------------------------------------------
+    broker_host: "rc-test.local"
+    broker_port: 1901
+
+    team_id: "PUCP"
+    vehicle_id: "USV1"
+    All_participating_vehicle_ids: ["USV1"]
+
+    send_declaration_role: true
+    auto_send_declaration_on_course: true
+
+    # Declared Task Tiers ("none", "core", "advanced", "disruptive")
+    task1_tier: "core"
+    task2_tier: "none"
+    task3_tier: "core"
+    task4_tier: "core"
+
+    # 2 Hz Heartbeat & Task State
+    heartbeat_rate_hz: 2.0
+    require_armed_for_auto: false
+    current_task: "none"
+    initial_task_on_run_start: "none"
+
+    # RunStart Gating & ArduPilot (ArduRover/ArduBoat) Mission Trigger
+    # Station-keep in HOLD or LOITER before RunStart (maps to STATE_AUTO),
+    # then switch to AUTO or GUIDED upon verified RunStart.
+    auto_trigger_mission_on_run_start: true
+    auto_arm_on_run_start: false
+    run_start_mode: "AUTO"
+
+    auto_ack_incidents: true
+    mavros_ns: "/usv/mavros"

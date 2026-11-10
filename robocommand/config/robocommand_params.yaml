@@ -1,0 +1,98 @@
+# Unified multi-vehicle configuration for UAV1 (PX4), USV1 (ArduPilot), and UUV1 (ArduSub)
+# robocommand_uav_bridge acts as the primary RunDeclaration publisher (send_declaration_role: true)
+# and shares active_declaration_seq on /robocommand/active_declaration_seq with USV1 and UUV1.
+
+robocommand_uav_bridge:
+  ros__parameters:
+    broker_host: "rc-test.local"
+    broker_port: 1901
+    team_id: "PUCP"
+    vehicle_id: "UAV1"
+    All_participating_vehicle_ids: ["USV1", "UUV1", "UAV1"]
+
+    send_declaration_role: true
+    auto_send_declaration_on_course: true
+
+    uav_pilot_callsign: "PILOT_UAPL12345"
+    uav_registration: ""
+    uav_geofence_max_altitude_hae_m: 40.0
+
+    task1_tier: "advanced"
+    task2_tier: "advanced"
+    task3_tier: "core"
+    task4_tier: "advanced"
+
+    auto_geofence_from_course: true
+    include_uav_transit_area: true
+    geofence_inset_m: 0.5
+    geofence_plan_file: ""
+    geofence_lats: [0.0]
+    geofence_lngs: [0.0]
+
+    heartbeat_rate_hz: 2.0
+    require_armed_for_auto: false
+    current_task: "none"
+    initial_task_on_run_start: "none"
+
+    auto_trigger_mission_on_run_start: true
+    auto_trigger_px4_mission_on_run_start: true
+    auto_arm_on_run_start: false
+    run_start_mode: "AUTO.MISSION"
+    px4_run_start_mode: "AUTO.MISSION"
+    auto_ack_incidents: true
+    mavros_ns: "/mavros"
+
+robocommand_usv_bridge:
+  ros__parameters:
+    broker_host: "rc-test.local"
+    broker_port: 1901
+    team_id: "PUCP"
+    vehicle_id: "USV1"
+    All_participating_vehicle_ids: ["USV1", "UUV1", "UAV1"]
+
+    send_declaration_role: false
+    auto_send_declaration_on_course: false
+
+    task1_tier: "advanced"
+    task2_tier: "advanced"
+    task3_tier: "core"
+    task4_tier: "advanced"
+
+    heartbeat_rate_hz: 2.0
+    require_armed_for_auto: false
+    current_task: "none"
+    initial_task_on_run_start: "none"
+
+    auto_trigger_mission_on_run_start: true
+    auto_arm_on_run_start: false
+    run_start_mode: "AUTO"
+    auto_ack_incidents: true
+    mavros_ns: "/usv/mavros"
+
+robocommand_uuv_bridge:
+  ros__parameters:
+    broker_host: "rc-test.local"
+    broker_port: 1901
+    team_id: "PUCP"
+    vehicle_id: "UUV1"
+    All_participating_vehicle_ids: ["USV1", "UUV1", "UAV1"]
+
+    send_declaration_role: false
+    auto_send_declaration_on_course: false
+
+    task1_tier: "advanced"
+    task2_tier: "advanced"
+    task3_tier: "core"
+    task4_tier: "advanced"
+
+    heartbeat_rate_hz: 2.0
+    require_armed_for_auto: false
+    current_task: "none"
+    initial_task_on_run_start: "none"
+    depth_source: "auto"
+
+    auto_trigger_mission_on_run_start: true
+    auto_arm_on_run_start: false
+    run_start_mode: "AUTO"
+    auto_ack_incidents: true
+    mavros_ns: "/uuv/mavros"

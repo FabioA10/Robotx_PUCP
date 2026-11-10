@@ -12,7 +12,7 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name, ['package.xml', 'FOLLOW_PREVIEW.md']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
@@ -27,6 +27,7 @@ setup(
             'navigation_node = usv_control.navigation_node:main',
             'position_control_node = usv_control.position_control_node:main',
             'uuv_follow_preview_node = usv_control.uuv_follow_preview_node:main',
+            'usv_command_shadow_node = usv_control.usv_command_shadow_node:main',
         ],
     },
 )

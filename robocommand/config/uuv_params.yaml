@@ -1,0 +1,52 @@
+robocommand_uuv_bridge:
+  ros__parameters:
+    # -------------------------------------------------------------------------
+    # RoboCommand MQTT Broker Configuration (§3.4.2, §3.4.5)
+    # -------------------------------------------------------------------------
+    broker_host: "rc-test.local"
+    broker_port: 1901
+
+    team_id: "PUCP"
+    vehicle_id: "UUV1"
+    All_participating_vehicle_ids: ["UUV1"]
+
+    send_declaration_role: true
+    auto_send_declaration_on_course: true
+
+    # Declared Task Tiers ("none", "core", "advanced", "disruptive")
+    task1_tier: "none"
+    task2_tier: "core"
+    task3_tier: "none"
+    task4_tier: "core"
+
+    # 2 Hz Heartbeat & Task State
+    heartbeat_rate_hz: 2.0
+    require_armed_for_auto: false
+    current_task: "none"
+    initial_task_on_run_start: "none"
+
+    # UUV Depth Source ("auto", "topic", "rel_alt", "vfr_hud")
+    # "auto" prefers ~/depth_m (Float64) if active, else <mavros_ns>/global_position/rel_alt (depth = max(0, -rel_alt))
+    depth_source: "auto"
+
+    # RunStart Gating & ArduSub Mission Trigger
+    # Station-keep in POSHOLD, ALT_HOLD, or HOLD before RunStart (maps to STATE_AUTO),
+    # then switch to AUTO or GUIDED upon verified RunStart.
+    # A verified RunStart is reported, but it must never change the ROV mode
+    # until a local operator has explicitly enabled it after a preflight check.
+    auto_trigger_mission_on_run_start: false
+    auto_trigger_px4_mission_on_run_start: false
+    enable_run_start_mode: false
+    auto_arm_on_run_start: false
+    run_start_mode: "AUTO"
+
+    # The UUV may request AUTO/GUIDED only with fresh MAVROS telemetry, local
+    # navigation and a depth sample. These remain active even when the
+    # operator enables run-start mode changes.
+    mission_start_requires_telemetry: true
+    mission_start_requires_local_position: true
+    mission_start_requires_depth: true
+    mission_start_telemetry_timeout_s: 1.5
+
+    auto_ack_incidents: true
+    mavros_ns: "/uuv/mavros"

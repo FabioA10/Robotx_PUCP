@@ -24,6 +24,7 @@ log_dashboard/
 
 # RobotX local hardware data
 recordings/
+/DATASET_COMPUERTA/
 *.mcap
 *.mcap.zstd
 *.db3
@@ -41,3 +42,13 @@ UUV_ws/real_ws/ping360_bags_inventario.txt
 /UUV_ws/real_ws/build*/
 /UUV_ws/real_ws/install*/
 /UUV_ws/real_ws/log*/
+
+# Reproducible MAVROS / RoboCommand local build products
+/UUV_ws/mavros_ardusub_ws/build/
+/UUV_ws/mavros_ardusub_ws/install/
+/UUV_ws/mavros_ardusub_ws/log/
+/UUV_ws/mavros_ardusub_ws.zip
+/robocommand/.venv/
+/robocommand/.build/
+/robocommand/.install/
+/robocommand/.log/

@@ -1,0 +1,8 @@
+# Copy to the processed dataset root as data.yaml, replacing DATASET_ROOT.
+path: "DATASET_ROOT"
+train: splits/train.txt
+val: splits/val.txt
+test: splits/test.txt
+names:
+  0: gate
+  1: opening

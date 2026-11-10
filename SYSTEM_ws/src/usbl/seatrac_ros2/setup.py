@@ -24,7 +24,11 @@ setup(
         ),
         (
             'share/' + package_name,
-            ['package.xml', 'USBL_INTERFACE.md'],
+            [
+                'package.xml',
+                'USBL_INTERFACE.md',
+                'FIRST_USBL_CAPTURE.md',
+            ],
         ),
         (
             os.path.join(

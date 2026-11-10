@@ -1,0 +1,54 @@
+robocommand_uav_bridge:
+  ros__parameters:
+    # -------------------------------------------------------------------------
+    # RoboCommand MQTT Broker Configuration (§3.4.2, §3.4.5)
+    # Course Alpha:   192.168.65.2
+    # Course Bravo:   192.168.66.2
+    # Course Charlie: 192.168.67.2
+    # Course Delta:   192.168.68.2
+    # Local Docker / Test Server: rc-test.local (port 1901) or localhost (1883)
+    # -------------------------------------------------------------------------
+    broker_host: "rc-test.local"
+    broker_port: 1901
+
+    team_id: "PUCP"
+    vehicle_id: "UAV1"
+    All_participating_vehicle_ids: ["UAV1"]
+
+    send_declaration_role: true
+    auto_send_declaration_on_course: true
+
+    # Singapore CAAS / Garuda Robotics UAV Regulatory Fields
+    uav_pilot_callsign: "PILOT_UAPL12345"
+    uav_registration: ""
+    uav_geofence_max_altitude_hae_m: 40.0
+
+    # Declared Task Tiers ("none", "core", "advanced", "disruptive")
+    task1_tier: "core"
+    task2_tier: "none"
+    task3_tier: "none"
+    task4_tier: "none"
+
+    # UAV Geofence Configuration
+    auto_geofence_from_course: true
+    include_uav_transit_area: true
+    geofence_inset_m: 0.5
+    geofence_plan_file: ""
+    geofence_lats: [0.0]
+    geofence_lngs: [0.0]
+
+    # 2 Hz Heartbeat & Task State
+    heartbeat_rate_hz: 2.0
+    require_armed_for_auto: false
+    current_task: "none"
+    initial_task_on_run_start: "none"
+
+    # RunStart Gating & PX4 Mission Trigger
+    auto_trigger_mission_on_run_start: true
+    auto_trigger_px4_mission_on_run_start: true
+    auto_arm_on_run_start: false
+    run_start_mode: "AUTO.MISSION"
+    px4_run_start_mode: "AUTO.MISSION"
+
+    auto_ack_incidents: true
+    mavros_ns: "/mavros"

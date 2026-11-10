@@ -8,6 +8,7 @@ seatrac_udp_node:
     blueos_ip: "192.168.2.3"
     blueos_port: 15000
     response_timeout_s: 3.0
+    max_rx_buffer_bytes: 65536
 
     # ------------------------------------------------------------
     # Environment - Sea water

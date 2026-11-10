@@ -10,7 +10,12 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from std_msgs.msg import String
 
-from usv_control.core import FollowConfig, RelativeFix, UuvFollowController
+from usv_control.core import (
+    FollowConfig,
+    FollowState,
+    RelativeFix,
+    UuvFollowController,
+)
 
 
 class UuvFollowPreviewNode(Node):
@@ -78,6 +83,11 @@ class UuvFollowPreviewNode(Node):
             "/usv/follow/cmd_vel_preview",
             10,
         )
+        self.candidate_publisher = self.create_publisher(
+            TwistStamped,
+            "/usv/follow/cmd_vel_candidate",
+            10,
+        )
         self.status_publisher = self.create_publisher(
             String,
             "/usv/follow/status",
@@ -143,6 +153,8 @@ class UuvFollowPreviewNode(Node):
         preview.twist.linear.x = decision.linear_x_mps
         preview.twist.angular.z = decision.angular_z_radps
         self.preview_publisher.publish(preview)
+        if decision.state in (FollowState.TRACKING, FollowState.HOLDING):
+            self.candidate_publisher.publish(preview)
 
         status = {
             "state": decision.state.value,
@@ -165,9 +177,15 @@ def main(args=None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
+        try:
+            node.destroy_node()
+        except KeyboardInterrupt:
+            pass
         if rclpy.ok():
-            rclpy.shutdown()
+            try:
+                rclpy.shutdown()
+            except KeyboardInterrupt:
+                pass
 
 
 if __name__ == "__main__":

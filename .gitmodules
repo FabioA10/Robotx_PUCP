@@ -1,0 +1,4 @@
+[submodule "UUV_ws/mavros_ardusub_ws/src/mavros"]
+	path = UUV_ws/mavros_ardusub_ws/src/mavros
+	url = https://github.com/mavlink/mavros.git
+	branch = ros2

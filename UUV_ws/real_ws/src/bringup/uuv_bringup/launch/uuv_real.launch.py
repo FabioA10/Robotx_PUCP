@@ -1,5 +1,15 @@
+"""
+Legacy bringup retained for compatibility; prefer uuv_dashboard launches.
+
+This launch does not start the current GUIDED sequence executor or its safety
+monitor.  Operational profiles live in ``uuv_dashboard``:
+``pool_manual.launch.py`` for supervised manual motion and
+``uuv_sequences.launch.py`` for guarded sequences.  All physical outputs in
+this legacy profile remain disabled by default.
+"""
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, TimerAction
+from launch.actions import DeclareLaunchArgument, LogInfo, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 
@@ -7,7 +17,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-
+    """Return the deprecated bringup with every physical output opt-in."""
     # ------------------------------------------------------------------
     # Launch arguments
     # ------------------------------------------------------------------
@@ -34,6 +44,15 @@ def generate_launch_description():
     arm_control = LaunchConfiguration('arm_control')
 
     return LaunchDescription([
+
+        LogInfo(
+            msg=(
+                'LEGACY LAUNCH: uuv_real.launch.py does not provide the current '
+                'GUIDED safety monitor. Use uuv_dashboard/pool_manual.launch.py '
+                'or uuv_dashboard/uuv_sequences.launch.py for documented '
+                'operations. Physical outputs remain opt-in here.'
+            )
+        ),
 
         # ==============================================================
         # Enable / disable subsystems
@@ -176,8 +195,10 @@ def generate_launch_description():
         # Xbox -> /joy -> xbox_teleop_node
         #      -> /uuv/cmd_vel_manual
         #
-        # IMPORTANT:
-        # /uuv/cmd_vel_manual is NOT connected to ArduSub yet.
+        # LEGACY PATH:
+        # This launch is not the documented operational profile.  When
+        # command_output=true the current MAVLink bridge can transmit manual
+        # commands, but this file does not start the GUIDED sequence monitor.
         # ==============================================================
 
         Node(

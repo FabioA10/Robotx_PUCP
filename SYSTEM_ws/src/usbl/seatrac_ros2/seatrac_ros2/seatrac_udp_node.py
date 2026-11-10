@@ -14,30 +14,20 @@ from rclpy.qos import (
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
+from seatrac_ros2.seatrac_protocol import (
+    SeaTracFrameError,
+    SeaTracStreamFramer,
+    crc16_ibm,
+    encode_capture_record,
+    parse_ascii_frame,
+)
+
 
 SYSTEM_INFO_COMMAND = b"#0281C1\r\n"
 STATUS_COMMAND = b"#10000DC0\r\n"
 MAG_CAL_RESET_COMMAND = b"#20041803\r\n"
 MAG_CAL_CALCULATE_COMMAND = b"#2005D9C3\r\n"
 SETTINGS_SAVE_COMMAND = b"#18000A\r\n"
-
-
-def crc16_ibm(data: bytes) -> int:
-    """Calcula el CRC-16-IBM utilizado por SeaTrac."""
-    crc = 0x0000
-
-    for byte in data:
-        value = byte
-
-        for _ in range(8):
-            if (value & 0x01) ^ (crc & 0x01):
-                crc = (crc >> 1) ^ 0xA001
-            else:
-                crc >>= 1
-
-            value >>= 1
-
-    return crc
 
 
 def build_seatrac_command(message_data: bytes) -> bytes:
@@ -65,6 +55,7 @@ class SeaTracUdpNode(Node):
         self.declare_parameter("blueos_port", 15000)
         self.declare_parameter("response_timeout_s", 3.0)
         self.declare_parameter("status_rate_hz", 1.0)
+        self.declare_parameter("max_rx_buffer_bytes", 65536)
         self.declare_parameter(
             "allow_persistent_save",
             False,
@@ -100,6 +91,11 @@ class SeaTracUdpNode(Node):
             self.get_parameter("status_rate_hz").value
         )
 
+        self.max_rx_buffer_bytes = max(
+            16,
+            int(self.get_parameter("max_rx_buffer_bytes").value),
+        )
+
         if self.status_rate_hz <= 0.0:
             self.status_rate_hz = 1.0
 
@@ -129,6 +125,15 @@ class SeaTracUdpNode(Node):
             10,
         )
 
+        capture_qos = QoSProfile(depth=100)
+        capture_qos.reliability = ReliabilityPolicy.RELIABLE
+        capture_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.frame_capture_publisher = self.create_publisher(
+            String,
+            "seatrac/frame_capture",
+            capture_qos,
+        )
+
         # --------------------------------------------------------------
         # UDP transport
         # --------------------------------------------------------------
@@ -147,7 +152,10 @@ class SeaTracUdpNode(Node):
             )
         )
 
-        self.rx_buffer = bytearray()
+        self.stream_framer = SeaTracStreamFramer(
+            self.max_rx_buffer_bytes
+        )
+        self.capture_sequence = 0
         self.system_info_received = False
 
         # --------------------------------------------------------------
@@ -222,7 +230,7 @@ class SeaTracUdpNode(Node):
 
     def drain_udp_input(self) -> None:
         """Descarta datos UDP pendientes antes de una transacción."""
-        self.rx_buffer.clear()
+        self.stream_framer.clear()
 
         while True:
             try:
@@ -234,6 +242,25 @@ class SeaTracUdpNode(Node):
         """Envía una trama SeaTrac al Serial Bridge de BlueOS."""
         self.udp_socket.send(command)
 
+    def publish_capture(
+        self,
+        raw_frame: bytes,
+        received_unix_ns: int,
+        received_monotonic_ns: int,
+        record_kind: str = 'frame',
+    ) -> None:
+        """Publish one byte-exact frame record before semantic routing."""
+        capture = encode_capture_record(
+            sequence=self.capture_sequence,
+            received_unix_ns=received_unix_ns,
+            received_monotonic_ns=received_monotonic_ns,
+            transport='blueos_udp',
+            raw_bytes=raw_frame,
+            record_kind=record_kind,
+        )
+        self.capture_sequence += 1
+        self.frame_capture_publisher.publish(String(data=capture))
+
     def read_response(
         self,
         expected_command_id: int,
@@ -241,64 +268,50 @@ class SeaTracUdpNode(Node):
     ):
         """Espera una respuesta SeaTrac válida para un Command ID."""
         deadline = time.monotonic() + timeout_seconds
-        local_buffer = bytearray()
+        local_framer = SeaTracStreamFramer(self.max_rx_buffer_bytes)
 
         while time.monotonic() < deadline:
+            completed_frames = []
 
             while True:
                 try:
                     data = self.udp_socket.recv(4096)
 
                     if data:
-                        local_buffer.extend(data)
+                        result = local_framer.feed(data)
+                        completed_frames.extend(result.frames)
+                        if result.discarded_bytes:
+                            self.publish_capture(
+                                result.discarded_data,
+                                time.time_ns(),
+                                time.monotonic_ns(),
+                                record_kind='unterminated_overflow',
+                            )
+                            self.get_logger().error(
+                                "SeaTrac RX transaccional descartó "
+                                f"{result.discarded_bytes} bytes sin CRLF."
+                            )
 
                 except BlockingIOError:
                     break
 
-            while b"\r\n" in local_buffer:
-
-                raw_line, _, remaining = local_buffer.partition(
-                    b"\r\n"
+            for complete_frame in completed_frames:
+                self.publish_capture(
+                    complete_frame,
+                    time.time_ns(),
+                    time.monotonic_ns(),
                 )
 
-                local_buffer = bytearray(remaining)
-
-                if not raw_line:
-                    continue
-
                 try:
-                    line = raw_line.decode("ascii")
-                except UnicodeDecodeError:
+                    parsed = parse_ascii_frame(complete_frame)
+                except SeaTracFrameError:
                     continue
 
-                if not line.startswith("$"):
-                    continue
-
+                line = parsed.raw_text
                 self.frame_raw_publisher.publish(String(data=line))
 
-                try:
-                    frame = bytes.fromhex(line[1:])
-                except ValueError:
-                    continue
-
-                if len(frame) < 3:
-                    continue
-
-                message_data = frame[:-2]
-
-                received_crc = struct.unpack(
-                    "<H",
-                    frame[-2:],
-                )[0]
-
-                if crc16_ibm(message_data) != received_crc:
-                    continue
-
-                if not message_data:
-                    continue
-
-                if message_data[0] == expected_command_id:
-                    return message_data
+                if parsed.command_id == expected_command_id:
+                    return parsed.message_data
 
             time.sleep(0.01)
 
@@ -814,63 +827,77 @@ class SeaTracUdpNode(Node):
                     data = self.udp_socket.recv(4096)
 
                     if data:
-                        self.rx_buffer.extend(data)
+                        received_unix_ns = time.time_ns()
+                        received_monotonic_ns = time.monotonic_ns()
+                        result = self.stream_framer.feed(data)
+                        if result.discarded_bytes:
+                            self.publish_capture(
+                                result.discarded_data,
+                                received_unix_ns,
+                                received_monotonic_ns,
+                                record_kind='unterminated_overflow',
+                            )
+                            self.get_logger().error(
+                                "SeaTrac RX descartó "
+                                f"{result.discarded_bytes} bytes sin CRLF "
+                                "al alcanzar el límite del buffer."
+                            )
+                        for raw_frame in result.frames:
+                            self.handle_received_frame(
+                                raw_frame,
+                                received_unix_ns,
+                                received_monotonic_ns,
+                            )
 
                 except BlockingIOError:
                     break
 
-            while b"\r\n" in self.rx_buffer:
-
-                raw_line, _, remaining = (
-                    self.rx_buffer.partition(
-                        b"\r\n"
-                    )
-                )
-
-                self.rx_buffer = bytearray(
-                    remaining
-                )
-
-                if not raw_line:
-                    continue
-
-                text = raw_line.decode(
-                    "ascii",
-                    errors="replace",
-                )
-
-                message = String()
-                message.data = text
-
-                if text.startswith("$"):
-                    self.frame_raw_publisher.publish(message)
-
-                if text.startswith("$02"):
-                    self.raw_publisher.publish(
-                        message
-                    )
-
-                    if not self.system_info_received:
-                        self.get_logger().info(
-                            "Comunicación ROS 2 ↔ "
-                            "BlueOS ↔ SeaTrac confirmada."
-                        )
-
-                    self.system_info_received = True
-
-                elif text.startswith("$10"):
-                    self.status_raw_publisher.publish(
-                        message
-                    )
-
-                else:
-                    self.get_logger().info(
-                        f"RX sin clasificar: {text}"
-                    )
-
         except OSError as error:
             self.get_logger().error(
                 f"Error recibiendo UDP: {error}"
+            )
+
+    def handle_received_frame(
+        self,
+        raw_frame: bytes,
+        received_unix_ns: int,
+        received_monotonic_ns: int,
+    ) -> None:
+        """Capture, validate and only then route one complete frame."""
+        self.publish_capture(
+            raw_frame,
+            received_unix_ns,
+            received_monotonic_ns,
+        )
+
+        try:
+            frame = parse_ascii_frame(raw_frame)
+        except SeaTracFrameError as error:
+            self.get_logger().warning(
+                f"Trama SeaTrac inválida preservada pero descartada: {error}"
+            )
+            return
+
+        message = String(data=frame.raw_text)
+        self.frame_raw_publisher.publish(message)
+
+        if frame.command_id == 0x02:
+            self.raw_publisher.publish(message)
+
+            if not self.system_info_received:
+                self.get_logger().info(
+                    "Comunicación ROS 2 ↔ BlueOS ↔ SeaTrac confirmada "
+                    "con CRC válido."
+                )
+
+            self.system_info_received = True
+
+        elif frame.command_id == 0x10:
+            self.status_raw_publisher.publish(message)
+
+        else:
+            self.get_logger().info(
+                f"RX válido sin clasificar: CID 0x{frame.command_id:02X}"
             )
 
     def check_response(self) -> None:

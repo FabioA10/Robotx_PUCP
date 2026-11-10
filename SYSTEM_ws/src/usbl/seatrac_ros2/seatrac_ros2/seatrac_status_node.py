@@ -8,25 +8,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-
-def crc16_ibm(data: bytes) -> int:
-    """Calcula el CRC-16-IBM usado por SeaTrac."""
-    crc = 0x0000
-    polynomial = 0xA001
-
-    for byte in data:
-        value = byte
-
-        for _ in range(8):
-            if (value & 0x01) ^ (crc & 0x01):
-                crc >>= 1
-                crc ^= polynomial
-            else:
-                crc >>= 1
-
-            value >>= 1
-
-    return crc
+from seatrac_ros2.seatrac_protocol import SeaTracFrameError, parse_ascii_frame
 
 
 class BinaryReader:
@@ -62,39 +44,19 @@ class BinaryReader:
 
 def decode_status_frame(text: str) -> Dict[str, Any]:
     """Decodifica una respuesta SeaTrac CID_STATUS ($10)."""
-    text = text.strip()
-
-    if not text.startswith("$"):
-        raise ValueError("La trama no empieza con '$'.")
-
-    hexadecimal = text[1:]
-
-    if len(hexadecimal) % 2 != 0:
-        raise ValueError("La cantidad de caracteres hexadecimales es impar.")
-
     try:
-        complete_frame = bytes.fromhex(hexadecimal)
-    except ValueError as error:
-        raise ValueError("La trama contiene caracteres no hexadecimales.") from error
+        frame = parse_ascii_frame(text)
+    except SeaTracFrameError as error:
+        raise ValueError(f"Trama SeaTrac inválida: {error}") from error
 
-    if len(complete_frame) < 12:
+    if len(frame.message_data) < 10:
         raise ValueError("La trama es demasiado corta.")
 
-    message_data = complete_frame[:-2]
-    received_crc = struct.unpack("<H", complete_frame[-2:])[0]
-    calculated_crc = crc16_ibm(message_data)
-
-    if received_crc != calculated_crc:
-        raise ValueError(
-            f"CRC incorrecto: recibido 0x{received_crc:04X}, "
-            f"calculado 0x{calculated_crc:04X}."
-        )
-
-    reader = BinaryReader(message_data)
+    reader = BinaryReader(frame.message_data)
 
     command_id = reader.read("B")
 
-    if command_id != 0x10:
+    if frame.command_id != 0x10:
         raise ValueError(
             f"Se esperaba CID_STATUS 0x10, pero llegó 0x{command_id:02X}."
         )

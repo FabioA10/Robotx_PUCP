@@ -180,6 +180,21 @@ def test_excessive_or_impossible_covariance_is_rejected():
     assert impossible.state == FollowState.REJECTED_FIX
 
 
+def test_principal_axis_covariance_limit_rejects_correlated_uncertainty():
+    """Correlation cannot hide an excessive uncertainty ellipse."""
+    result = controller(max_horizontal_stddev_m=0.5).evaluate(
+        fix(
+            variance_x_m2=0.20,
+            variance_y_m2=0.20,
+            covariance_xy_m2=0.10,
+        ),
+        10.0,
+        True,
+    )
+    assert result.state == FollowState.REJECTED_FIX
+    assert 'uncertainty' in result.reason
+
+
 def test_invalid_configuration_is_rejected():
     invalid_configs = (
         {"distance_deadband_m": -0.1},

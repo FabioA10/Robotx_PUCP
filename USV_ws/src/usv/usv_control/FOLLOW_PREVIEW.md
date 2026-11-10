@@ -2,8 +2,10 @@
 
 Esta guía permite comprobar la cadena X150 del bote y X110/X010 del submarino,
 además del seguidor del USV, sin publicar órdenes a MAVROS. El nodo
-`uuv_follow_preview_node` solamente publica en
-`/usv/follow/cmd_vel_preview`; no arma el bote ni controla actuadores.
+`uuv_follow_preview_node` publica la observación continua en
+`/usv/follow/cmd_vel_preview` y, solamente durante `tracking` o `holding`, una
+propuesta en `/usv/follow/cmd_vel_candidate`. Ninguna de las dos interfaces
+arma el bote ni controla actuadores.
 
 > La máquina de desarrollo fue comprobada con ROS 2 Jazzy. `SYSTEM_ws` y
 > `USV_ws` están documentados originalmente para Humble, por lo que la prueba
@@ -35,6 +37,10 @@ Prueba unitaria directa del controlador independiente de ROS:
 ```bash
 cd ~/Escritorio/ROS_2/Robotx_PUCP/USV_ws/src/usv/usv_control
 python3 -m pytest -q \
+  test/test_command_arbiter.py \
+  test/test_usv_command_shadow_node.py \
+  test/test_uuv_follow_shadow_launch.py \
+  test/test_uuv_follow_shadow_pipeline.py \
   test/test_uuv_follow_model.py \
   test/test_uuv_follow_preview_node.py
 ```
@@ -69,6 +75,92 @@ tres mediciones nuevas antes de volver a `tracking`.
 `/usbl/relative_pose` usa el perfil ROS `sensor_data` (best effort), compatible
 con el simulador, el replay CSV y una fuente acústica que no deba bloquearse
 por retransmisiones. Los tópicos de estado y preview permanecen reliable.
+
+### Cadena completa en modo shadow
+
+Para probar también la frontera de arbitraje, todavía sin salida física:
+
+```bash
+ros2 launch usv_control uuv_follow_shadow.launch.py \
+  follow_enabled:=false \
+  shadow_enabled:=false \
+  usbl_source:=fake
+```
+
+La cadena es:
+
+```text
+/usbl/relative_pose
+  -> /usv/follow/cmd_vel_candidate
+  -> /usv/control/cmd_vel_shadow
+```
+
+`cmd_vel_candidate` solo se publica mientras el seguidor está en `tracking` o
+`holding`. El árbitro aplica timeout, conexión, killswitch, límites de velocidad
+y aceleración, y un latch de aborto que exige deshabilitar antes de reintentar.
+El launch no inventa estados de seguridad: exige observaciones frescas de
+conexión y killswitch, no inicia MAVROS y no posee un publicador de actuadores.
+
+Para una prueba completamente simulada, publique ambos gates desde dos
+terminales adicionales. Deben mantenerse a una frecuencia mayor que el timeout
+de seguridad de 0.5 s:
+
+```bash
+ros2 topic pub -r 10 /usv/connected std_msgs/msg/Bool '{data: true}'
+```
+
+```bash
+ros2 topic pub -r 10 /usv/control/killswitch std_msgs/msg/Bool '{data: false}'
+```
+
+Luego habilite explícitamente ambos nodos; arrancar deshabilitado permite
+limpiar cualquier latch antes de la prueba:
+
+```bash
+ros2 param set /uuv_follow_preview_node follow_enabled true
+ros2 param set /usv_command_shadow_node shadow_enabled true
+```
+
+`usbl_source` es una selección exclusiva:
+
+- `fake` inicia exactamente un `fake_usbl_node` dentro de este launch.
+- `external` no inicia ninguna fuente USBL y exige exactamente un publicador
+  externo, ya sea el replay normalizado o el futuro decoder real revisado.
+
+Para usar un CSV revisado, inicie primero la única fuente externa:
+
+```bash
+ros2 launch seatrac_ros2 usbl_csv_replay.launch.py \
+  csv_path:=/RUTA/ABSOLUTA/captura_normalizada.csv
+```
+
+Después inicie la cadena shadow sin simulador:
+
+```bash
+ros2 launch usv_control uuv_follow_shadow.launch.py \
+  follow_enabled:=false \
+  shadow_enabled:=false \
+  usbl_source:=external
+```
+
+No combine el replay con `usbl_source:=fake`. Antes de habilitar el seguidor,
+confirme que existe exactamente un publicador, inicie los dos gates simulados
+anteriores y habilite ambos nodos:
+
+```bash
+ros2 topic info -v /usbl/relative_pose
+```
+
+Estados y salidas auditables:
+
+```bash
+ros2 topic echo /usv/control/arbiter_status
+ros2 topic echo /usv/control/cmd_vel_shadow
+ros2 node info /usv_command_shadow_node
+```
+
+No remapee `cmd_vel_candidate`, `cmd_vel_preview` ni `cmd_vel_shadow` hacia un
+tópico MAVROS. Son interfaces de observación y aceptación de software.
 
 ## 3. Monitorizar y registrar evidencia
 
@@ -107,7 +199,10 @@ cd ~/robotx_bags
 ros2 bag record \
   /usbl/relative_pose \
   /usv/follow/status \
-  /usv/follow/cmd_vel_preview
+  /usv/follow/cmd_vel_preview \
+  /usv/follow/cmd_vel_candidate \
+  /usv/control/cmd_vel_shadow \
+  /usv/control/arbiter_status
 ```
 
 Detenga el bag con `Ctrl+C` y anote junto a él la configuración, posiciones
@@ -139,7 +234,7 @@ No ejecute `fake_usbl_node` al mismo tiempo que el driver real. Con el X150 del
 bote conectado mediante el puente UDP de BlueOS, inicie:
 
 ```bash
-ros2 launch seatrac_ros2 usbl.launch.py environment:=freshwater
+ros2 launch seatrac_ros2 usbl_capture.launch.py environment:=freshwater
 ```
 
 En otra terminal registre las tramas antes de interpretar el protocolo:
@@ -148,16 +243,18 @@ En otra terminal registre las tramas antes de interpretar el protocolo:
 mkdir -p ~/robotx_bags
 cd ~/robotx_bags
 ros2 bag record \
+  /seatrac/frame_capture \
   /seatrac/frame_raw \
   /seatrac/status_raw \
   /seatrac/system_info_raw
 ```
 
-`/seatrac/frame_raw` recoge las tramas que llegan al receptor continuo,
-incluidas las todavía no clasificadas. Algunas respuestas de una transacción
-pueden ser consumidas dentro de callbacks de servicios seriales y no aparecer
-en ese tópico; para una captura limpia no invoque servicios de calibración,
-entorno o guardado durante el ensayo.
+`/seatrac/frame_capture` es la evidencia forense primaria: conserva bytes,
+terminador, secuencia, tiempos de recepción y resultado CRC incluso para datos
+inválidos o un overflow sin CRLF. `/seatrac/frame_raw` contiene sólo tramas que
+ya pasaron el CRC, aunque su CID todavía pueda estar sin clasificar. Para una
+captura limpia no invoque servicios de calibración, entorno o guardado durante
+el ensayo.
 
 La integración actual todavía no decodifica el posicionamiento acústico real
 a `/usbl/relative_pose`. Por tanto, recibir estado del X150 o guardar tramas no
@@ -184,28 +281,31 @@ decoder real hasta verificar físicamente esa transformación, sus signos y ejes
 Todos los puntos siguientes son obligatorios:
 
 1. Compilación limpia y prueba unitaria sin fallos.
-2. El único tópico de mando generado es
-   `/usv/follow/cmd_vel_preview`; ningún nodo preview publica a MAVROS.
-3. La posición lleva timestamp monotónico, frame correcto y covarianza
+2. Los únicos tópicos de mando generados son los no actuantes
+   `/usv/follow/cmd_vel_preview`, `/usv/follow/cmd_vel_candidate` y, si se
+   ejecuta el shadow, `/usv/control/cmd_vel_shadow`; ninguno publica a MAVROS.
+3. Existe exactamente un publicador de `/usbl/relative_pose`; nunca se ejecutan
+   al mismo tiempo la fuente fake, el replay y el decoder real.
+4. La posición lleva timestamp monotónico, frame correcto y covarianza
    horizontal finita, no negativa y coherente con la dispersión observada.
-4. Adelante produce `x>0`, izquierda `y>0` y derecha `y<0` en todas las
+5. Adelante produce `x>0`, izquierda `y>0` y derecha `y<0` en todas las
    repeticiones.
-5. La frecuencia real permite tres fixes consecutivos y el intervalo máximo
+6. La frecuencia real permite tres fixes consecutivos y el intervalo máximo
    normal es menor que 2.5 s. Si no se cumple, no aumente el timeout sin
    reevaluar primero la seguridad.
-6. Una pérdida mayor de 2.5 s lleva a `lost_target` y a velocidades exactamente
+7. Una pérdida mayor de 2.5 s lleva a `lost_target` y a velocidades exactamente
    cero; la recuperación exige tres fixes nuevos.
-7. Fixes fuera de rango, vencidos, con frame incorrecto, covarianza inválida o
+8. Fixes fuera de rango, vencidos, con frame incorrecto, covarianza inválida o
    saltos imposibles producen cero.
-8. El preview nunca retrocede y respeta `linear.x <= 0.20 m/s` y
+9. El preview nunca retrocede y respeta `linear.x <= 0.20 m/s` y
    `|angular.z| <= 0.30 rad/s`.
-9. Con el X110/X010 quieto durante al menos 60 s, el error radial del 95 % de
+10. Con el X110/X010 quieto durante al menos 60 s, el error radial del 95 % de
    las muestras es menor que 0.10 m, valor provisional inferior al deadband de
    0.20 m. Si la piscina produce más dispersión o multipath, el resultado es
    No-Go.
-10. Existe un bag reproducible que demuestra seguimiento, pérdida, parada y
+11. Existe un bag reproducible que demuestra seguimiento, pérdida, parada y
     reacquisición, y un operador revisó los signos y límites.
-11. Antes de una prueba motorizada debe existir un árbitro único de comandos,
+12. Antes de una prueba motorizada debe existir un árbitro único de comandos,
     parada manual/killswitch, gate explícito de habilitación y prueba separada
     a potencia limitada. El preview por sí solo no autoriza actuación.
 

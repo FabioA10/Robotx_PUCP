@@ -267,8 +267,17 @@ class UuvFollowController:
         determinant = variance_x * variance_y - covariance_xy * covariance_xy
         if determinant < -self.config.covariance_tolerance_m4:
             return "USBL horizontal covariance is not positive semidefinite"
+        # Bound the worst horizontal direction, not only the X/Y axes.  A
+        # strongly correlated covariance can have acceptable diagonal terms
+        # while its principal-axis uncertainty exceeds the configured limit.
+        trace = variance_x + variance_y
+        discriminant = math.hypot(
+            variance_x - variance_y,
+            2.0 * covariance_xy,
+        )
+        maximum_eigenvalue = 0.5 * (trace + discriminant)
         variance_limit = self.config.max_horizontal_stddev_m ** 2
-        if max(variance_x, variance_y) > variance_limit:
+        if maximum_eigenvalue > variance_limit:
             return "USBL horizontal uncertainty exceeds the configured limit"
         return None
 

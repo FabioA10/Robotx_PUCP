@@ -128,6 +128,7 @@ def test_adapter_has_no_physical_command_publishers(ros_context):
         topics = {publisher.topic_name for publisher in node.publishers}
         assert topics == {
             '/parameter_events',
+            '/usv/follow/cmd_vel_candidate',
             '/usv/follow/cmd_vel_preview',
             '/usv/follow/status',
         }
